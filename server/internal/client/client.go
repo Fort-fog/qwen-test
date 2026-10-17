@@ -32,6 +32,8 @@ type EventHandler interface {
 	OnMessage(m Message)
 	OnAck(a Ack)
 	OnError(e ServerError)
+	// OnKeyResponse delivers the answer to a RequestPeerKey lookup.
+	OnKeyResponse(k KeyResponse)
 	// OnClosed fires when the connection ends (cleanly or with error).
 	OnClosed(reason error)
 }
@@ -39,11 +41,12 @@ type EventHandler interface {
 // NullHandler can be embedded to implement EventHandler partially.
 type NullHandler struct{}
 
-func (NullHandler) OnWelcome(Welcome)   {}
-func (NullHandler) OnMessage(Message)   {}
-func (NullHandler) OnAck(Ack)           {}
-func (NullHandler) OnError(ServerError) {}
-func (NullHandler) OnClosed(error)      {}
+func (NullHandler) OnWelcome(Welcome)    {}
+func (NullHandler) OnMessage(Message)    {}
+func (NullHandler) OnAck(Ack)            {}
+func (NullHandler) OnError(ServerError)  {}
+func (NullHandler) OnKeyResponse(KeyRes) {}
+func (NullHandler) OnClosed(error)       {}
 
 // Client is a single relay session. Not safe for concurrent Connect/Close;
 // Send/Sync may be called from any goroutine once Connected.
@@ -131,6 +134,7 @@ func (c *Client) Connect() (*Welcome, error) {
 	hello.Payload = mustJSON(map[string]any{
 		"device_id":    c.cfg.DeviceID,
 		"client_nonce": hex.EncodeToString(nonce),
+		"identity_pub": c.cfg.IdentityPub, // optional; server validates if present
 	})
 	if err := writeRaw(hello); err != nil {
 		conn.Close()
@@ -391,6 +395,29 @@ func (c *Client) handleInbound(raw []byte) {
 		var e ServerError
 		_ = json.Unmarshal(p.Payload, &e)
 		c.handler.OnError(e)
+	case protocol.PacketKeyResponse:
+		var k KeyRes
+		_ = json.Unmarshal(p.Payload, &k)
+		c.handler.OnKeyResponse(k)
+	}
+}
+
+// RequestPeerKey asks the server for an online peer's announced identity
+// public key (KEY_REQUEST). The answer arrives asynchronously via
+// OnKeyResponse, correlated by TargetDeviceID.
+func (c *Client) RequestPeerKey(target string) error {
+	if !c.Connected() {
+		return ErrNotConnected
+	}
+	p := newEnvelope(protocol.PacketKeyRequest)
+	p.MsgID = newMsgID()
+	p.From = c.cfg.DeviceID
+	p.Payload = mustJSON(map[string]string{"target_device_id": target})
+	select {
+	case c.sendCh <- p:
+		return nil
+	case <-c.done:
+		return ErrNotConnected
 	}
 }
 

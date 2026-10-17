@@ -22,6 +22,7 @@ type Session struct {
 	DeviceID    string
 	SessionID   string // server-generated opaque id
 	Nonce       string // client-provided random nonce for this session
+	IdentityPub string // client's long-lived X25519 public key, base64 std (optional)
 	ConnectedAt time.Time
 	LastSeen    time.Time
 	// Send queues a serialised packet to this session's writer goroutine.
@@ -103,4 +104,15 @@ func (r *Registry) Count() int {
 func (r *Registry) Online(deviceID string) bool {
 	_, ok := r.Get(deviceID)
 	return ok
+}
+
+// IdentityPub returns the announced X25519 identity public key (base64 std)
+// of an ONLINE device, if it presented one at HELLO. The relay only stores
+// and publishes public keys — never private material.
+func (r *Registry) IdentityPub(deviceID string) (string, bool) {
+	s, ok := r.Get(deviceID)
+	if !ok || s.IdentityPub == "" {
+		return "", false
+	}
+	return s.IdentityPub, true
 }

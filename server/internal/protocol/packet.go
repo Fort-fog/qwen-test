@@ -40,6 +40,8 @@ const (
 	PacketSyncRequest  PacketType = "SYNC_REQUEST"
 	PacketSyncResponse PacketType = "SYNC_RESPONSE"
 	PacketStoreAck     PacketType = "STORE_ACK"
+	PacketKeyRequest   PacketType = "KEY_REQUEST"
+	PacketKeyResponse  PacketType = "KEY_RESPONSE"
 	FileOffer          PacketType = "FILE_OFFER"
 	FileChunk          PacketType = "FILE_CHUNK"
 	FileComplete       PacketType = "FILE_COMPLETE"
@@ -56,6 +58,7 @@ var validTypes = map[PacketType]bool{
 	PairRequest: true, PairAccept: true, PairReject: true,
 	PacketMessage: true, PacketMessageAck: true, PacketDeliveryStat: true,
 	PacketSyncRequest: true, PacketSyncResponse: true, PacketStoreAck: true,
+	PacketKeyRequest: true, PacketKeyResponse: true,
 	FileOffer: true, FileChunk: true, FileComplete: true,
 	CallOffer: true, CallAnswer: true, CallICE: true,
 	CallReject: true, CallEnd: true,
@@ -71,6 +74,7 @@ var ClientToServerTypes = map[PacketType]bool{
 	PairRequest: true, PairAccept: true, PairReject: true,
 	PacketMessage: true, PacketMessageAck: true, PacketDeliveryStat: true,
 	PacketSyncRequest: true, PacketStoreAck: true,
+	PacketKeyRequest: true,
 	FileOffer: true, FileChunk: true, FileComplete: true,
 	CallOffer: true, CallAnswer: true, CallICE: true,
 	CallReject: true, CallEnd: true,
@@ -79,6 +83,7 @@ var ClientToServerTypes = map[PacketType]bool{
 // ServerOnlyTypes lists packet types only the server may send.
 var ServerOnlyTypes = map[PacketType]bool{
 	PacketWelcome: true, PacketPong: true, PacketError: true, PacketSyncResponse: true,
+	PacketKeyResponse: true,
 }
 
 // Packet is the envelope for every protocol message.
@@ -213,6 +218,22 @@ type WelcomePayload struct {
 	MaxPacketBytes  int    `json:"max_packet_bytes"`
 	PingIntervalSec int    `json:"ping_interval_sec"`
 	PendingMessages int    `json:"pending_messages"`
+}
+
+// KeyRequestPayload: client -> server lookup for a peer's identity key so
+// the client can seal an E2E envelope for it. Server answers with
+// KEY_RESPONSE (or ERROR PEER_NOT_FOUND).
+type KeyRequestPayload struct {
+	TargetDeviceID string `json:"target_device_id"`
+}
+
+// KeyResponsePayload: server -> client. Found=false means the peer is not
+// online or has no announced identity key; clients must then either queue
+// plaintext-mode messages (with the warning banner) or refuse to send.
+type KeyResponsePayload struct {
+	TargetDeviceID string `json:"target_device_id"`
+	Found          bool   `json:"found"`
+	IdentityPub    string `json:"identity_pub,omitempty"` // base64 std X25519 pub
 }
 
 // SyncResponsePayload is the payload structure of a server-originated

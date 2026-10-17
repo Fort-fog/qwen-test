@@ -17,6 +17,12 @@ import (
 type Config struct {
 	URL      string // ws://host:port/ws or wss://...
 	DeviceID string // 8..64 chars [A-Za-z0-9_-]
+
+	// IdentityPub is this device's long-lived X25519 public key encoded as
+	// base64 std (32 raw bytes). Optional: when set it is announced in the
+	// HELLO payload so peers can look it up via KEY_REQUEST and seal E2E
+	// envelopes for us. Private keys never leave the owning client.
+	IdentityPub string
 }
 
 // Message is an application message as seen by the client. Payload stays
@@ -59,6 +65,19 @@ type ServerError struct {
 	Message  string             `json:"message"`
 	RefMsgID string             `json:"ref_msg_id,omitempty"`
 }
+
+// KeyRes is the payload of a KEY_RESPONSE packet: the identity public key
+// (base64 std X25519) an online peer announced at HELLO, or Found=false if
+// the peer is offline / has no key. KeyResponse is an alias kept for the
+// EventHandler signature readability.
+type KeyRes struct {
+	TargetDeviceID string `json:"target_device_id"`
+	Found          bool   `json:"found"`
+	IdentityPub    string `json:"identity_pub,omitempty"`
+}
+
+// KeyResponse is the answer to RequestPeerKey (see KeyRes).
+type KeyResponse = KeyRes
 
 func newEnvelope(t protocol.PacketType) *protocol.Packet {
 	return &protocol.Packet{

@@ -5,6 +5,7 @@ package relay
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,15 @@ func newSessionID() string {
 	return hex.EncodeToString(b)
 }
 
+// e2eeWarningFor returns the WELCOME warning text for the session's E2E
+// posture. Empty string means encryption is active (no warning banner).
+func e2eeWarningFor(active bool) string {
+	if active {
+		return ""
+	}
+	return "END-TO-END ENCRYPTION NOT ACTIVE YET: this client did not present an identity key. Do not send real private data."
+}
+
 // HandleHello validates a HELLO packet payload and registers the session.
 // It returns the WELCOME (or ERROR) packet to send back, plus the live
 // session when registration succeeded (nil otherwise). If the device has
@@ -56,6 +66,7 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 		DeviceID    string `json:"device_id"`
 		ClientNonce string `json:"client_nonce"`
 		CapVersion  int    `json:"client_version"`
+		IdentityPub string `json:"identity_pub"` // base64 std X25519 pub (optional)
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &hello); err != nil {
@@ -66,11 +77,23 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 		return r.errorPacket(protocol.ErrCodeMalformed,
 			"HELLO requires a well-formed device_id (8..64 chars of [A-Za-z0-9_-])", ""), nil
 	}
+	// identity_pub is optional (legacy/plaintext clients). When present it
+	// must be a well-formed X25519 public key; the relay never interprets
+	// message payloads, but knowing peers' identity keys lets it publish
+	// them for E2E envelope sealing by other clients.
+	if hello.IdentityPub != "" {
+		pk, err := base64.StdEncoding.DecodeString(hello.IdentityPub)
+		if err != nil || len(pk) != 32 {
+			return r.errorPacket(protocol.ErrCodeMalformed,
+				"HELLO identity_pub must be base64 of a 32-byte X25519 public key", ""), nil
+		}
+	}
 	sess := &devices.Session{
-		DeviceID:  hello.DeviceID,
-		SessionID: newSessionID(),
-		Nonce:     hello.ClientNonce,
-		Send:      send,
+		DeviceID:    hello.DeviceID,
+		SessionID:   newSessionID(),
+		Nonce:       hello.ClientNonce,
+		IdentityPub: hello.IdentityPub,
+		Send:        send,
 	}
 	if err := r.reg.Register(sess); err != nil {
 		return r.errorPacket(protocol.ErrCodeUnauthorized,
@@ -83,6 +106,12 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 		pending = r.store.Count(sess.DeviceID)
 	}
 
+	// E2E posture: the relay itself never decrypts anything. A session that
+	// announced an identity key at HELLO is capable of sealing/opening v1
+	// envelopes; we report e2ee_active accordingly and hand back the peer's
+	// identity key (when online) so the client can encrypt for it. Clients
+	// without identity_pub keep receiving the plaintext-mode warning.
+	e2eeActive := sess.IdentityPub != ""
 	welcome := &protocol.Packet{
 		Version: protocol.ProtocolVersion,
 		Type:    protocol.PacketWelcome,
@@ -90,8 +119,8 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 		Payload: mustJSON(protocol.WelcomePayload{
 			ServerTime:      time.Now().UnixMilli(),
 			SessionID:       sess.SessionID,
-			E2EEActive:      false,
-			E2EEWarning:     "END-TO-END ENCRYPTION NOT ACTIVE YET: this build relays plaintext test packets. Do not send real private data.",
+			E2EEActive:      e2eeActive,
+			E2EEWarning:     e2eeWarningFor(e2eeActive),
 			MaxPacketBytes:  r.maxBytes,
 			PingIntervalSec: 25,
 			PendingMessages: pending,
@@ -171,6 +200,9 @@ func (r *Relay) Dispatch(sender *devices.Session, p *protocol.Packet, out chan [
 
 	case protocol.PacketStoreAck:
 		r.handleStoreAck(sender, p, out)
+
+	case protocol.PacketKeyRequest:
+		r.handleKeyRequest(sender, p, out)
 
 	case protocol.PacketDeviceReg:
 		// Reserved for key-based registration handshake (not implemented).
@@ -340,6 +372,36 @@ func (r *Relay) handleSync(sender *devices.Session, p *protocol.Packet, out chan
 		MsgID:   p.MsgID,
 		TS:      time.Now().UnixMilli(),
 		Payload: mustJSON(protocol.SyncResponsePayload{Messages: synced}),
+	}
+	send(out, resp)
+}
+
+// handleKeyRequest answers KEY_REQUEST lookups: returns the identity public
+// key an ONLINE peer announced at HELLO, so the requester can seal an E2E
+// envelope for it. The relay only publishes public keys that clients chose
+// to announce; it never sees private material or message content.
+func (r *Relay) handleKeyRequest(sender *devices.Session, p *protocol.Packet, out chan []byte) {
+	var req struct {
+		TargetDeviceID string `json:"target_device_id"`
+	}
+	if len(p.Payload) == 0 || json.Unmarshal(p.Payload, &req) != nil || req.TargetDeviceID == "" {
+		send(out, r.errorPacketAt(protocol.ErrCodeMalformed,
+			"KEY_REQUEST requires payload {\"target_device_id\": ...}", p.MsgID))
+		return
+	}
+	pub, ok := r.reg.IdentityPub(req.TargetDeviceID)
+	resp := &protocol.Packet{
+		Version: protocol.ProtocolVersion,
+		Type:    protocol.PacketKeyResponse,
+		From:    "server",
+		To:      sender.DeviceID,
+		MsgID:   p.MsgID, // correlation id
+		TS:      time.Now().UnixMilli(),
+		Payload: mustJSON(protocol.KeyResponsePayload{
+			TargetDeviceID: req.TargetDeviceID,
+			Found:          ok,
+			IdentityPub:    pub,
+		}),
 	}
 	send(out, resp)
 }
