@@ -1,0 +1,19 @@
+{
+  "aad_format": "\"boltun-aad-v1|\"+hex(sender_pub)+\"|\"+hex(recip_pub)+\"|\"+msg_id",
+  "derived_key_hex": "a99028733785aceca3d4b11054a2a5a98337567728ea776a1d7912abeaf88324",
+  "envelope_b64": "AEN/RixYqJZPpxgWQBnuPcqrYCPbM5yFfs0qMaVridVOTExMTExMTExMTExMsm1Qrl7R5bLidtcsqWEHB2hJnBpgl2rZsEU+VXKA1M+DdsSFpg==",
+  "envelope_hex": "00437f462c58a8964fa718164019ee3dcaab6023db339c857ecd2a31a56b89d54e4c4c4c4c4c4c4c4c4c4c4c4cb26d50ae5ed1e5b2e276d72ca961070768499c1a60976ad9b0453e557280d4cf8376c485a6",
+  "envelope_layout": "[1B version=0x00][32B ephemeral pub][12B nonce][ciphertext||16B GCM tag]",
+  "ephemeral_priv_hex": "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b",
+  "ephemeral_pub_hex": "437f462c58a8964fa718164019ee3dcaab6023db339c857ecd2a31a56b89d54e",
+  "kdf": "HKDF-SHA256(ikm=X25519(eph_priv, recip_pub), salt=eph_pub[32], info=\"boltun-e2e-v1|\"+hex(sender_pub)+\"|\"+hex(recip_pub)+\"|\"+msg_id, L=32)",
+  "msg_id": "0102030405060708090a0b0c0d0e0f10",
+  "nonce_hex": "4c4c4c4c4c4c4c4c4c4c4c4c",
+  "plaintext_utf8": "boltun e2e vector one",
+  "recipient_identity_priv_hex": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+  "recipient_identity_pub_hex": "07aaff3e9fc167275544f4c3a6a17cd837f2ec6e78cd8a57b1e3dfb3cc035a76",
+  "scheme": "boltun-e2e-v1",
+  "sender_identity_priv_hex": "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+  "sender_identity_pub_hex": "2bd3950461202e242f2bae83c077119d5ba4ae300583d7ebb7923b226d853343",
+  "transport_payload_json": "{\"kind\":\"e2ee\",\"v\":1,\"env\":\"base64std(envelope)\"}"
+}
