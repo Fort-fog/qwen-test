@@ -10,9 +10,13 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
+import '../crypto/e2e.dart';
 import '../net/relay_client.dart';
 import '../protocol/packet.dart';
+import 'identity_store.dart';
 import 'message_store.dart';
 
 class SessionConfig {
@@ -20,11 +24,17 @@ class SessionConfig {
     required this.url,
     required this.deviceId,
     this.displayName = '',
+    this.identityStore,
   });
 
   final String url; // ws://host:port/ws
   final String deviceId;
   final String displayName;
+
+  /// E2E identity persistence. When null, the session runs in legacy
+  /// plaintext mode (no identity_pub announced). NOTE: production must use
+  /// a keystore-backed IdentityStore — see identity_store.dart limitations.
+  final IdentityStore? identityStore;
 }
 
 /// Everything the UI needs, in one stream.
@@ -46,6 +56,13 @@ class BoltunSession {
   BoltunRelayClient? _client;
   MessageStore? _store;
   SessionConfig? _config;
+  IdentityKeyPair? _identity;
+
+  /// Envelopes received before the sender's identity key was resolved;
+  /// retried automatically when KEY_RESPONSE arrives (mirrors the Go
+  /// E2EHandler deferred queue, bounded per peer).
+  final Map<String, List<Packet>> _deferred = {};
+  static const int _maxDeferredPerPeer = 100;
 
   final StreamController<SessionSnapshot> _snap =
       StreamController.broadcast();
@@ -58,15 +75,21 @@ class BoltunSession {
   bool get isConnected => _state == ConnState.connected;
   MessageStore? get store => _store;
   SessionConfig? get config => _config;
+  IdentityKeyPair? get identity => _identity;
 
   /// Open the local store and connect to the relay. Safe to call once;
   /// reconnection is handled internally by the relay client.
   Future<void> start(SessionConfig cfg) async {
     _config = cfg;
     _store = await MessageStore.open();
+    final store = cfg.identityStore;
+    if (store != null) {
+      _identity = await store.loadOrCreate();
+    }
     final client = BoltunRelayClient(
       url: cfg.url,
       deviceId: cfg.deviceId,
+      identity: _identity,
       events: RelayEvents(
         onWelcome: (w) {
           // The server always announces whether E2EE is active; surface the
@@ -76,6 +99,7 @@ class BoltunSession {
         },
         onMessage: _handleInbound,
         onAck: _handleAck,
+        onKeyResponse: _handleKeyResponse,
         onError: (code, msg) {
           _lastError = '$code: $msg';
           _emit();
@@ -97,6 +121,10 @@ class BoltunSession {
   }
 
   void _handleInbound(Packet p) {
+    if (p.type == PacketType.message && _isE2eEnvelope(p.payload)) {
+      _handleE2eInbound(p);
+      return;
+    }
     final store = _store;
     if (store == null) return;
     // Durable first, ack after — never ack a message we haven't persisted.
@@ -106,6 +134,103 @@ class BoltunSession {
       }
       _emit();
     }));
+  }
+
+  static bool _isE2eEnvelope(Object? payload) =>
+      payload is Map && payload['kind'] == 'e2ee';
+
+  /// Opens an incoming "e2ee" envelope before persisting/acking it.
+  /// Failure modes are terminal-safe: malformed envelopes and open errors
+  /// are surfaced via lastError and NOT stored as readable messages; an
+  /// unknown sender key defers the envelope until KEY_RESPONSE resolves it.
+  void _handleE2eInbound(Packet p) {
+    final self = _identity;
+    final client = _client;
+    if (self == null || client == null) {
+      _lastError = 'E2E_OPEN_FAILED: encrypted message but no identity key';
+      _emit();
+      return;
+    }
+    final envB64 = p.payload is Map ? (p.payload as Map)['env'] : null;
+    if (envB64 is! String) {
+      _lastError = 'E2E_MALFORMED_ENVELOPE (${p.msgId})';
+      _emit();
+      return;
+    }
+    final Uint8List raw;
+    try {
+      raw = decodeEnvelope(envB64);
+    } catch (_) {
+      _lastError = 'E2E_MALFORMED_ENVELOPE (${p.msgId})';
+      _emit();
+      return;
+    }
+    final senderPub = client.peerKeys[p.from];
+    if (senderPub == null) {
+      // Queue for retry once the sender's key resolves; ask for it now.
+      final dq = _deferred.putIfAbsent(p.from, () => <Packet>[]);
+      if (dq.length < _maxDeferredPerPeer) dq.add(p);
+      unawaited(client.resolvePeerKey(p.from));
+      _lastError = 'E2E_NO_SENDER_KEY: ${p.from} (${p.msgId})';
+      _emit();
+      return;
+    }
+    _openAndStore(p, raw, senderPub);
+  }
+
+  Future<void> _openAndStore(Packet p, Uint8List raw, Uint8List senderPub) async {
+    final store = _store;
+    if (store == null) return;
+    try {
+      final plain = await open(_identity!, raw, p.msgId, senderPub);
+      final text = utf8.decode(plain);
+      final opened = Packet(
+        type: p.type,
+        msgId: p.msgId,
+        from: p.from,
+        to: p.to,
+        ts: p.ts,
+        payload: TextPayload.build(text),
+      );
+      // Durable first, ack after — same contract as plaintext inbound.
+      final fresh = await store.putInbound(opened);
+      if (fresh) _client?.ackStored(p.msgId);
+    } on E2eException catch (e) {
+      // Auth failure / tampering: never store, never silently drop.
+      _lastError = 'E2E_OPEN_FAILED: ${e.message} (${p.msgId})';
+    } on FormatException {
+      _lastError = 'E2E_OPEN_FAILED: invalid utf-8 plaintext (${p.msgId})';
+    }
+    _emit();
+  }
+
+  void _handleKeyResponse(KeyResponse r) {
+    if (!r.found || r.identityPub.isEmpty) return;
+    final client = _client;
+    if (client == null) return;
+    Uint8List key;
+    try {
+      key = Uint8List.fromList(base64.decode(r.identityPub));
+    } catch (_) {
+      return;
+    }
+    if (key.length != 32) return;
+    client.peerKeys[r.targetDeviceId] = key;
+    // Retry envelopes that arrived before this sender's key was known.
+    final retry = _deferred.remove(r.targetDeviceId);
+    if (retry != null) {
+      for (final p in retry) {
+        final env = p.payload is Map ? (p.payload as Map)['env'] : null;
+        if (env is! String) continue;
+        Uint8List raw;
+        try {
+          raw = decodeEnvelope(env);
+        } catch (_) {
+          continue; // malformed while waiting — surface, don't crash the loop
+        }
+        unawaited(_openAndStore(p, raw, key));
+      }
+    }
   }
 
   void _handleAck(String refMsgId, String stage) {
@@ -118,11 +243,30 @@ class BoltunSession {
 
   /// Send a text message to [peerId]. Returns the local msg_id immediately;
   /// the message is already visible in the store as an outgoing echo.
+  ///
+  /// When E2E is configured (identity present) the text is sealed with
+  /// e2e.Seal before leaving the device — the relay only ever sees the
+  /// opaque envelope. If the recipient's identity key cannot be resolved,
+  /// the message is NOT sent and nothing is echoed as delivered.
   Future<String?> sendText(String peerId, String text) async {
     final client = _client;
     final store = _store;
     if (client == null || store == null) return null;
     if (!client.isConnected) return null;
+    if (_identity != null) {
+      final id = await client.sendE2EText(peerId, text);
+      if (id == null) {
+        _lastError = 'E2E_NO_RECIPIENT_KEY: $peerId (message not sent)';
+        _emit();
+        return null;
+      }
+      // Store the plaintext locally (device-side only); the wire carried
+      // only the sealed envelope.
+      await store.putOutgoing(
+          peerId, {'kind': 'e2ee', 'sent': true}, msgId: id, text: text);
+      _emit();
+      return id;
+    }
     final id = client.sendMessage(peerId, TextPayload.build(text));
     await store.putOutgoing(peerId, TextPayload.build(text),
         msgId: id, text: text);

@@ -11,9 +11,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show SocketException;
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import '../crypto/e2e.dart';
 import '../protocol/packet.dart';
 
 enum ConnState { disconnected, connecting, connected }
@@ -54,6 +56,7 @@ class RelayEvents {
     this.onError,
     this.onDisconnected,
     this.onStateChanged,
+    this.onKeyResponse,
   });
 
   final void Function(WelcomeInfo w)? onWelcome;
@@ -62,6 +65,31 @@ class RelayEvents {
   final void Function(String code, String message)? onError;
   final void Function()? onDisconnected;
   final void Function(ConnState state)? onStateChanged;
+  final void Function(KeyResponse r)? onKeyResponse;
+}
+
+/// Payload of a KEY_RESPONSE packet (mirrors Go client.KeyRes).
+class KeyResponse {
+  const KeyResponse({
+    required this.targetDeviceId,
+    required this.found,
+    this.identityPub = '',
+  });
+
+  final String targetDeviceId;
+  final bool found;
+
+  /// base64-std 32-byte X25519 public key, empty when [found] is false.
+  final String identityPub;
+
+  static KeyResponse fromPayload(Object? p) {
+    final m = p is Map ? p : const {};
+    return KeyResponse(
+      targetDeviceId: m['target_device_id'] as String? ?? '',
+      found: m['found'] as bool? ?? false,
+      identityPub: m['identity_pub'] as String? ?? '',
+    );
+  }
 }
 
 class BoltunRelayClient {
@@ -70,12 +98,18 @@ class BoltunRelayClient {
     required this.deviceId,
     this.events = const RelayEvents(),
     this.maxReconnectDelay = const Duration(seconds: 30),
+    this.identity,
   });
 
   final String url;
   final String deviceId;
   final RelayEvents events;
   final Duration maxReconnectDelay;
+
+  /// This device's E2E identity key pair. When provided, HELLO announces
+  /// its public key (server validates base64/32B and registers it for
+  /// KEY_REQUEST lookups). Private material never leaves the device.
+  final IdentityKeyPair? identity;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _sub;
@@ -88,6 +122,12 @@ class BoltunRelayClient {
 
   /// Inbound msg_id dedup (at-least-once semantics).
   final Set<String> _seen = <String>{};
+
+  /// Pending KEY_REQUEST waiters keyed by target device id. The relay
+  /// echoes the request msg_id in the response for correlation.
+  final Map<String, Completer<KeyResponse>> _keyWaiters = {};
+  final Map<String, String> _keyReqIdByTarget = {};
+  final Map<String, String> _keyTargetsByReqId = {};
 
   ConnState get state => _state;
   bool get isConnected => _state == ConnState.connected;
@@ -125,10 +165,18 @@ class BoltunRelayClient {
     );
 
     // HELLO — device identity bound by the server from here on.
+    // identity_pub (when E2E is configured) is announced so peers can look
+    // it up via KEY_REQUEST; the server validates base64/32B and never sees
+    // private material. Mirrors Go client.go HELLO payload.
     final nonce = base64Url.encode(List<int>.generate(16, (_) => _rnd.nextInt(256)));
     _rawSend(Packet(
       type: PacketType.hello,
-      payload: {'device_id': deviceId, 'client_nonce': nonce},
+      payload: {
+        'device_id': deviceId,
+        'client_nonce': nonce,
+        if (identity != null)
+          'identity_pub': base64.encode(identity!.publicBytes),
+      },
     ));
 
     final welcome = await _awaitWelcome();
@@ -166,6 +214,8 @@ class BoltunRelayClient {
         }
       case PacketType.pong:
         break;
+      case PacketType.keyResponse:
+        _handleKeyResponse(p);
       case PacketType.message:
       case PacketType.pairRequest:
       case PacketType.pairAccept:
@@ -198,7 +248,57 @@ class BoltunRelayClient {
     }
   }
 
+  /// Correlate a KEY_RESPONSE with the in-flight KEY_REQUEST. The relay
+  /// echoes the request's msg_id; fall back to target_device_id matching.
+  void _handleKeyResponse(Packet p) {
+    final r = KeyResponse.fromPayload(p.payload);
+    events.onKeyResponse?.call(r);
+    String? target = _keyTargetsByReqId.remove(p.msgId);
+    target ??= r.targetDeviceId;
+    final c = _keyWaiters.remove(target);
+    _keyReqIdByTarget.remove(target);
+    if (c != null && !c.isCompleted) c.complete(r);
+  }
+
+  /// Ask the relay for [target]'s announced identity public key and await
+  /// the KEY_RESPONSE (bounded by [timeout]). Throws [TimeoutException] on
+  /// no answer, [StateError] when not connected. found=false means the peer
+  /// is offline or never announced a key.
+  Future<KeyResponse> requestPeerKey(
+    String target, {
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    if (_channel == null || _state != ConnState.connected) {
+      throw StateError('not connected');
+    }
+    final existing = _keyWaiters[target];
+    if (existing != null) return existing.future.timeout(timeout);
+    final c = Completer<KeyResponse>();
+    final id = newMsgId();
+    _keyWaiters[target] = c;
+    _keyReqIdByTarget[target] = id;
+    _keyTargetsByReqId[id] = target;
+    _rawSend(Packet(
+      type: PacketType.keyRequest,
+      msgId: id,
+      from: deviceId,
+      payload: {'target_device_id': target},
+    ));
+    try {
+      return await c.future.timeout(timeout);
+    } on TimeoutException {
+      // Drop the waiter so a later request can retry cleanly.
+      if (identical(_keyWaiters[target], c)) {
+        _keyWaiters.remove(target);
+        _keyReqIdByTarget.remove(target);
+        _keyTargetsByReqId.remove(id);
+      }
+      rethrow;
+    }
+  }
+
   void _handleSyncResponse(Packet p) {
+
     final pl = p.payload;
     final list = pl is Map ? pl['messages'] : null;
     if (list is! List) return;
@@ -249,6 +349,16 @@ class BoltunRelayClient {
     _pingTimer = null;
     _sub?.cancel();
     _sub = null;
+    // Fail all in-flight KEY_REQUEST waiters — they can never be answered
+    // on the dead connection (callers treat this as "key unknown").
+    for (final c in _keyWaiters.values) {
+      if (!c.isCompleted) {
+        c.completeError(const SocketException('connection closed'));
+      }
+    }
+    _keyWaiters.clear();
+    _keyReqIdByTarget.clear();
+    _keyTargetsByReqId.clear();
     try {
       _channel?.sink.close();
     } catch (_) {}
@@ -288,12 +398,69 @@ class BoltunRelayClient {
     return _sendRouted(PacketType.message, recipient, payload);
   }
 
-  String _sendRouted(String type, String recipient, Object? payload) {
+  /// Peer identity keys resolved via KEY_RESPONSE (deviceID -> 32B pub).
+  final Map<String, Uint8List> peerKeys = {};
+
+  /// Resolve and cache [peer]'s identity public key (KEY_REQUEST round-trip).
+  /// Returns null when the peer is offline or announced no key.
+  Future<Uint8List?> resolvePeerKey(String peer) async {
+    final known = peerKeys[peer];
+    if (known != null) return known;
+    try {
+      final r = await requestPeerKey(peer);
+      if (!r.found || r.identityPub.isEmpty) return null;
+      final Uint8List key;
+      try {
+        key = Uint8List.fromList(base64.decode(r.identityPub));
+      } catch (_) {
+        return null; // not valid base64 — treat as unusable
+      }
+      if (key.length != 32) return null; // server validates too, belt & braces
+      peerKeys[peer] = key;
+      return key;
+    } on TimeoutException {
+      return null;
+    }
+  }
+
+  /// Seal [text] for [recipient] with E2E and send it as a MESSAGE.
+  ///
+  /// Delivery semantics (mirrors Go SendE2EMessage):
+  ///  - the recipient's identity key must be resolved first; otherwise the
+  ///    message is NOT sent (never in plaintext, never "delivered");
+  ///  - msg_id is generated BEFORE sealing so the envelope AAD binds it —
+  ///    the relay cannot re-route or replay the envelope under another id.
+  /// Returns the msg_id used for ack correlation.
+  Future<String?> sendE2EText(String recipient, String text) async {
+    final self = identity;
+    if (self == null) throw StateError('e2e identity not configured');
+    if (_channel == null || _state != ConnState.connected) {
+      throw StateError('not connected');
+    }
+    final recipPub = await resolvePeerKey(recipient);
+    if (recipPub == null) return null; // key unknown -> refuse to send
+    final id = newMsgId();
+    final env = await seal(
+      self,
+      recipPub,
+      id,
+      Uint8List.fromList(utf8.encode(text)),
+    );
+    _sendRouted(PacketType.message, recipient, {
+      'kind': 'e2ee',
+      'v': 1,
+      'env': encodeEnvelope(env),
+    }, msgId: id);
+    return id;
+  }
+
+  String _sendRouted(String type, String recipient, Object? payload,
+      {String? msgId}) {
     final ch = _channel;
     if (ch == null || _state != ConnState.connected) {
       throw StateError('not connected');
     }
-    final id = newMsgId();
+    final id = msgId ?? newMsgId();
     _rawSend(Packet(
       type: type,
       msgId: id,

@@ -25,6 +25,8 @@ class PacketType {
   static const pairRequest = 'PAIR_REQUEST';
   static const pairAccept = 'PAIR_ACCEPT';
   static const pairReject = 'PAIR_REJECT';
+  static const keyRequest = 'KEY_REQUEST';
+  static const keyResponse = 'KEY_RESPONSE';
 }
 
 /// A single protocol envelope. [payload] stays opaque (E2E design):
