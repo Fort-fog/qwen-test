@@ -46,7 +46,11 @@ func newSessionID() string {
 
 // HandleHello validates a HELLO packet payload and registers the session.
 // It returns the WELCOME (or ERROR) packet to send back, plus the live
-// session when registration succeeded (nil otherwise).
+// session when registration succeeded (nil otherwise). If the device has
+// messages queued in the offline store, they are flushed proactively into
+// the session queue as SYNC_RESPONSE right after registration — the client
+// does not need to send SYNC_REQUEST first (explicit SYNC_REQUEST still
+// works and is idempotent).
 func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Packet, *devices.Session) {
 	var hello struct {
 		DeviceID    string `json:"device_id"`
@@ -93,7 +97,47 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 			PendingMessages: pending,
 		}),
 	}
+
+	// Proactive flush: deliver queued offline messages immediately after the
+	// handshake so clients don't have to issue SYNC_REQUEST on every reconnect.
+	if pending > 0 {
+		r.flushPending(sess)
+	}
+
 	return welcome, sess
+}
+
+// flushPending sends a SYNC_RESPONSE with everything currently queued for
+// the session's device. Safe to call repeatedly (idempotent until acked).
+func (r *Relay) flushPending(sess *devices.Session) {
+	if r.store == nil {
+		return
+	}
+	msgs, err := r.store.Pending(sess.DeviceID)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	synced := make([]protocol.SyncedMessage, 0, len(msgs))
+	for _, m := range msgs {
+		synced = append(synced, protocol.SyncedMessage{
+			MsgID:   m.MsgID,
+			From:    m.From,
+			Type:    m.Type,
+			TS:      m.TS,
+			Payload: m.Payload,
+		})
+	}
+	resp := &protocol.Packet{
+		Version: protocol.ProtocolVersion,
+		Type:    protocol.PacketSyncResponse,
+		From:    "server",
+		To:      sess.DeviceID,
+		MsgID:   newSessionID(), // synthetic id; dedup happens per message inside
+		TS:      time.Now().UnixMilli(),
+		Payload: mustJSON(protocol.SyncResponsePayload{Messages: synced}),
+	}
+	send(sess.Send, resp)
+	r.logger.Printf("auto-sync device=%s messages=%d", sess.DeviceID, len(synced))
 }
 
 // Dispatch processes one validated inbound packet from an authenticated
