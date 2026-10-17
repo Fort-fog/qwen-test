@@ -60,7 +60,8 @@ class RelayEvents {
   });
 
   final void Function(WelcomeInfo w)? onWelcome;
-  final void Function(Packet msg)? onMessage; // MESSAGE and routed signalling types
+  final void Function(Packet msg)?
+  onMessage; // MESSAGE and routed signalling types
   final void Function(String refMsgId, String stage)? onAck;
   final void Function(String code, String message)? onError;
   final void Function()? onDisconnected;
@@ -138,7 +139,11 @@ class BoltunRelayClient {
   Future<WelcomeInfo> connect() async {
     _wantConnect = true;
     if (_state == ConnState.connected) {
-      return WelcomeInfo(serverTime: 0, pingIntervalSec: 25, pendingMessages: 0);
+      return WelcomeInfo(
+        serverTime: 0,
+        pingIntervalSec: 25,
+        pendingMessages: 0,
+      );
     }
     final h = _handshake;
     if (h != null) return h;
@@ -168,16 +173,20 @@ class BoltunRelayClient {
     // identity_pub (when E2E is configured) is announced so peers can look
     // it up via KEY_REQUEST; the server validates base64/32B and never sees
     // private material. Mirrors Go client.go HELLO payload.
-    final nonce = base64Url.encode(List<int>.generate(16, (_) => _rnd.nextInt(256)));
-    _rawSend(Packet(
-      type: PacketType.hello,
-      payload: {
-        'device_id': deviceId,
-        'client_nonce': nonce,
-        if (identity != null)
-          'identity_pub': base64.encode(identity!.publicBytes),
-      },
-    ));
+    final nonce = hex(List<int>.generate(16, (_) => _rnd.nextInt(256)));
+    _rawSend(
+      Packet(
+        type: PacketType.hello,
+        payload: {
+          'device_id': deviceId,
+          'client_nonce': nonce,
+          if (identity != null)
+            // Server expects standard base64 of the raw 32-byte key
+            // (protocol.Hello.identity_pub).
+            'identity_pub': base64.encode(identity!.publicBytes),
+        },
+      ),
+    );
 
     final welcome = await _awaitWelcome();
     _retries = 0;
@@ -192,9 +201,12 @@ class BoltunRelayClient {
   Future<WelcomeInfo> _awaitWelcome() {
     final c = Completer<WelcomeInfo>();
     _welcomeCompleter = c;
-    return c.future.timeout(const Duration(seconds: 10), onTimeout: () {
-      throw TimeoutException('no WELCOME from $url within 10s');
-    });
+    return c.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {
+        throw TimeoutException('no WELCOME from $url within 10s');
+      },
+    );
   }
 
   void _onFrame(dynamic frame) {
@@ -278,12 +290,14 @@ class BoltunRelayClient {
     _keyWaiters[target] = c;
     _keyReqIdByTarget[target] = id;
     _keyTargetsByReqId[id] = target;
-    _rawSend(Packet(
-      type: PacketType.keyRequest,
-      msgId: id,
-      from: deviceId,
-      payload: {'target_device_id': target},
-    ));
+    _rawSend(
+      Packet(
+        type: PacketType.keyRequest,
+        msgId: id,
+        from: deviceId,
+        payload: {'target_device_id': target},
+      ),
+    );
     try {
       return await c.future.timeout(timeout);
     } on TimeoutException {
@@ -298,7 +312,6 @@ class BoltunRelayClient {
   }
 
   void _handleSyncResponse(Packet p) {
-
     final pl = p.payload;
     final list = pl is Map ? pl['messages'] : null;
     if (list is! List) return;
@@ -364,7 +377,8 @@ class BoltunRelayClient {
     } catch (_) {}
     _channel = null;
     final wc = _welcomeCompleter;
-    if (wc != null && !wc.isCompleted) wc.completeError(const SocketException('closed'));
+    if (wc != null && !wc.isCompleted)
+      wc.completeError(const SocketException('closed'));
     _welcomeCompleter = null;
   }
 
@@ -376,7 +390,11 @@ class BoltunRelayClient {
       if (_wantConnect && _state == ConnState.disconnected) {
         connect().catchError((_) {
           // failure triggers onDone → reschedule via backoff
-          return WelcomeInfo(serverTime: 0, pingIntervalSec: 25, pendingMessages: 0);
+          return WelcomeInfo(
+            serverTime: 0,
+            pingIntervalSec: 25,
+            pendingMessages: 0,
+          );
         });
       }
     });
@@ -454,35 +472,45 @@ class BoltunRelayClient {
     return id;
   }
 
-  String _sendRouted(String type, String recipient, Object? payload,
-      {String? msgId}) {
+  String _sendRouted(
+    String type,
+    String recipient,
+    Object? payload, {
+    String? msgId,
+  }) {
     final ch = _channel;
     if (ch == null || _state != ConnState.connected) {
       throw StateError('not connected');
     }
     final id = msgId ?? newMsgId();
-    _rawSend(Packet(
-      type: type,
-      msgId: id,
-      from: deviceId, // server overwrites with bound identity anyway
-      to: recipient,
-      ts: DateTime.now().millisecondsSinceEpoch,
-      payload: payload,
-    ));
+    _rawSend(
+      Packet(
+        type: type,
+        msgId: id,
+        from: deviceId, // server overwrites with bound identity anyway
+        to: recipient,
+        ts: DateTime.now().millisecondsSinceEpoch,
+        payload: payload,
+      ),
+    );
     return id;
   }
 
   void requestSync() {
-    _rawSend(Packet(type: PacketType.syncRequest, msgId: newMsgId(), from: deviceId));
+    _rawSend(
+      Packet(type: PacketType.syncRequest, msgId: newMsgId(), from: deviceId),
+    );
   }
 
   void ackStored(String refMsgId) {
-    _rawSend(Packet(
-      type: PacketType.storeAck,
-      msgId: newMsgId(),
-      from: deviceId,
-      payload: {'ref_msg_id': refMsgId},
-    ));
+    _rawSend(
+      Packet(
+        type: PacketType.storeAck,
+        msgId: newMsgId(),
+        from: deviceId,
+        payload: {'ref_msg_id': refMsgId},
+      ),
+    );
   }
 
   void _rawSend(Packet p) {

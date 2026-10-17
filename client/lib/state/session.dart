@@ -13,11 +13,20 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import '../crypto/e2e.dart';
+import '../crypto/e2e.dart' as e2e;
 import '../net/relay_client.dart';
 import '../protocol/packet.dart';
 import 'identity_store.dart';
 import 'message_store.dart';
+
+// `open` is also the name of MessageStore.open's verb; alias the crypto
+// entry point so both read unambiguously.
+Future<Uint8List> e2eOpen(
+  e2e.IdentityKeyPair recipient,
+  Uint8List envelope,
+  String msgId,
+  Uint8List senderPub,
+) => e2e.open(recipient, envelope, msgId, senderPub);
 
 class SessionConfig {
   const SessionConfig({
@@ -56,7 +65,10 @@ class BoltunSession {
   BoltunRelayClient? _client;
   MessageStore? _store;
   SessionConfig? _config;
-  IdentityKeyPair? _identity;
+  // Non-nullable so `_identity!` is unnecessary and the
+  // analyzer's null checks are sound. Null-equivalent = not configured.
+  late e2e.IdentityKeyPair? _identity;
+  bool _started = false;
 
   /// Envelopes received before the sender's identity key was resolved;
   /// retried automatically when KEY_RESPONSE arrives (mirrors the Go
@@ -64,8 +76,7 @@ class BoltunSession {
   final Map<String, List<Packet>> _deferred = {};
   static const int _maxDeferredPerPeer = 100;
 
-  final StreamController<SessionSnapshot> _snap =
-      StreamController.broadcast();
+  final StreamController<SessionSnapshot> _snap = StreamController.broadcast();
   ConnState _state = ConnState.disconnected;
   String? _lastError;
   String? _e2eeWarning;
@@ -75,12 +86,15 @@ class BoltunSession {
   bool get isConnected => _state == ConnState.connected;
   MessageStore? get store => _store;
   SessionConfig? get config => _config;
-  IdentityKeyPair? get identity => _identity;
+  e2e.IdentityKeyPair? get identity => _identity;
 
   /// Open the local store and connect to the relay. Safe to call once;
   /// reconnection is handled internally by the relay client.
   Future<void> start(SessionConfig cfg) async {
+    if (_started) return;
+    _started = true;
     _config = cfg;
+    _identity = null;
     _store = await MessageStore.open();
     final store = cfg.identityStore;
     if (store != null) {
@@ -112,11 +126,17 @@ class BoltunSession {
       ),
     );
     _client = client;
-    unawaited(client.connect().catchError((Object e) {
-      _lastError = e.toString();
-      _emit();
-      return WelcomeInfo(serverTime: 0, pingIntervalSec: 25, pendingMessages: 0);
-    }));
+    unawaited(
+      client.connect().catchError((Object e) {
+        _lastError = e.toString();
+        _emit();
+        return WelcomeInfo(
+          serverTime: 0,
+          pingIntervalSec: 25,
+          pendingMessages: 0,
+        );
+      }),
+    );
     _emit();
   }
 
@@ -128,12 +148,14 @@ class BoltunSession {
     final store = _store;
     if (store == null) return;
     // Durable first, ack after — never ack a message we haven't persisted.
-    unawaited(store.putInbound(p).then((fresh) {
-      if (fresh) {
-        _client?.ackStored(p.msgId);
-      }
-      _emit();
-    }));
+    unawaited(
+      store.putInbound(p).then((fresh) {
+        if (fresh) {
+          _client?.ackStored(p.msgId);
+        }
+        _emit();
+      }),
+    );
   }
 
   static bool _isE2eEnvelope(Object? payload) =>
@@ -159,7 +181,7 @@ class BoltunSession {
     }
     final Uint8List raw;
     try {
-      raw = decodeEnvelope(envB64);
+      raw = e2e.decodeEnvelope(envB64);
     } catch (_) {
       _lastError = 'E2E_MALFORMED_ENVELOPE (${p.msgId})';
       _emit();
@@ -178,11 +200,17 @@ class BoltunSession {
     _openAndStore(p, raw, senderPub);
   }
 
-  Future<void> _openAndStore(Packet p, Uint8List raw, Uint8List senderPub) async {
+  Future<void> _openAndStore(
+    Packet p,
+    Uint8List raw,
+    Uint8List senderPub,
+  ) async {
     final store = _store;
     if (store == null) return;
+    final self = _identity;
+    if (self == null) return; // no key -> nothing to open with; caller guarded
     try {
-      final plain = await open(_identity!, raw, p.msgId, senderPub);
+      final plain = await e2eOpen(self, raw, p.msgId, senderPub);
       final text = utf8.decode(plain);
       final opened = Packet(
         type: p.type,
@@ -195,7 +223,7 @@ class BoltunSession {
       // Durable first, ack after — same contract as plaintext inbound.
       final fresh = await store.putInbound(opened);
       if (fresh) _client?.ackStored(p.msgId);
-    } on E2eException catch (e) {
+    } on e2e.E2eException catch (e) {
       // Auth failure / tampering: never store, never silently drop.
       _lastError = 'E2E_OPEN_FAILED: ${e.message} (${p.msgId})';
     } on FormatException {
@@ -224,7 +252,7 @@ class BoltunSession {
         if (env is! String) continue;
         Uint8List raw;
         try {
-          raw = decodeEnvelope(env);
+          raw = e2e.decodeEnvelope(env);
         } catch (_) {
           continue; // malformed while waiting — surface, don't crash the loop
         }
@@ -254,6 +282,8 @@ class BoltunSession {
     if (client == null || store == null) return null;
     if (!client.isConnected) return null;
     if (_identity != null) {
+      // Seal + wire send FIRST; only a message that actually left the
+      // device is echoed as sent (refusal -> nothing stored, see below).
       final id = await client.sendE2EText(peerId, text);
       if (id == null) {
         _lastError = 'E2E_NO_RECIPIENT_KEY: $peerId (message not sent)';
@@ -263,13 +293,21 @@ class BoltunSession {
       // Store the plaintext locally (device-side only); the wire carried
       // only the sealed envelope.
       await store.putOutgoing(
-          peerId, {'kind': 'e2ee', 'sent': true}, msgId: id, text: text);
+        peerId,
+        {'kind': 'e2ee', 'sent': true},
+        msgId: id,
+        text: text,
+      );
       _emit();
       return id;
     }
     final id = client.sendMessage(peerId, TextPayload.build(text));
-    await store.putOutgoing(peerId, TextPayload.build(text),
-        msgId: id, text: text);
+    await store.putOutgoing(
+      peerId,
+      TextPayload.build(text),
+      msgId: id,
+      text: text,
+    );
     _emit();
     return id;
   }
@@ -279,12 +317,14 @@ class BoltunSession {
 
   void _emit() {
     if (_snap.isClosed) return;
-    _snap.add(SessionSnapshot(
-      state: _state,
-      conversations: _store?.conversations() ?? const [],
-      lastError: _lastError,
-      e2eeWarning: _e2eeWarning,
-    ));
+    _snap.add(
+      SessionSnapshot(
+        state: _state,
+        conversations: _store?.conversations() ?? const [],
+        lastError: _lastError,
+        e2eeWarning: _e2eeWarning,
+      ),
+    );
   }
 
   Future<void> stop() async {
