@@ -49,14 +49,16 @@ class Packet {
   final Object? payload; // Map/List/String — serialized as-is
 
   Map<String, dynamic> toJson() => {
-        'version': protocolVersion,
-        'type': type,
-        if (msgId.isNotEmpty) 'msg_id': msgId,
-        if (from.isNotEmpty) 'from': from,
-        if (to.isNotEmpty) 'to': to,
-        if (ts != 0) 'ts': ts,
-        if (payload != null) 'payload': payload,
-      };
+    // Wire key is `version` — matches server/internal/protocol.Packet
+    // (`Version int json:"version"`). Dart field name differs on purpose.
+    'version': protocolVersion,
+    'type': type,
+    if (msgId.isNotEmpty) 'msg_id': msgId,
+    if (from.isNotEmpty) 'from': from,
+    if (to.isNotEmpty) 'to': to,
+    if (ts != 0) 'ts': ts,
+    if (payload != null) 'payload': payload,
+  };
 
   String encode() => jsonEncode(toJson());
 
@@ -87,7 +89,10 @@ class Packet {
 
 /// Text chat message payload helper.
 class TextPayload {
-  static Map<String, dynamic> build(String text) => {'kind': 'text', 'text': text};
+  static Map<String, dynamic> build(String text) => {
+    'kind': 'text',
+    'text': text,
+  };
 
   static String? extract(Object? payload) {
     if (payload is Map && payload['kind'] == 'text') {

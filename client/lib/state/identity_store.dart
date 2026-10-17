@@ -57,7 +57,10 @@ class InMemoryIdentityStore implements IdentityStore {
 /// development/testing; production builds must use a real keystore-backed
 /// IdentityStore instead.
 class DevSharedPreferencesIdentityStore implements IdentityStore {
-  DevSharedPreferencesIdentityStore(this._getPrefs, {this.keyName = 'boltun.identity.priv_b64'});
+  DevSharedPreferencesIdentityStore(
+    this._getPrefs, {
+    this.keyName = 'boltun.identity.priv_b64',
+  });
 
   final Future<SharedPreferencesLike> Function() _getPrefs;
   final String keyName;

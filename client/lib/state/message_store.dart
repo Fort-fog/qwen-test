@@ -35,26 +35,26 @@ class StoredChat {
   bool ackedServer; // STORE_ACK sent (inbound) / MESSAGE_ACK received (out)
 
   Map<String, dynamic> toJson() => {
-        'msg_id': msgId,
-        'peer': peerId,
-        'out': outgoing,
-        'ts': ts,
-        if (text != null) 'text': text,
-        if (rawPayload != null) 'payload': rawPayload,
-        'acked': ackedServer,
-      };
+    'msg_id': msgId,
+    'peer': peerId,
+    'out': outgoing,
+    'ts': ts,
+    if (text != null) 'text': text,
+    if (rawPayload != null) 'payload': rawPayload,
+    'acked': ackedServer,
+  };
 
   static StoredChat fromJson(Map<String, dynamic> j) => StoredChat(
-        msgId: j['msg_id'] as String? ?? '',
-        peerId: j['peer'] as String? ?? '',
-        outgoing: j['out'] as bool? ?? false,
-        ts: (j['ts'] as num?)?.toInt() ?? 0,
-        text: j['text'] as String?,
-        rawPayload: j['payload'] is Map<String, dynamic>
-            ? j['payload'] as Map<String, dynamic>
-            : null,
-        ackedServer: j['acked'] as bool? ?? false,
-      );
+    msgId: j['msg_id'] as String? ?? '',
+    peerId: j['peer'] as String? ?? '',
+    outgoing: j['out'] as bool? ?? false,
+    ts: (j['ts'] as num?)?.toInt() ?? 0,
+    text: j['text'] as String?,
+    rawPayload: j['payload'] is Map<String, dynamic>
+        ? j['payload'] as Map<String, dynamic>
+        : null,
+    ackedServer: j['acked'] as bool? ?? false,
+  );
 }
 
 /// SharedPreferences-backed message store with an in-memory mirror for
@@ -151,8 +151,12 @@ class MessageStore {
   }
 
   /// Record a message we are sending (before the relay confirms anything).
-  Future<String> putOutgoing(String peerId, Map<String, dynamic> payload,
-      {required String msgId, String? text}) async {
+  Future<String> putOutgoing(
+    String peerId,
+    Map<String, dynamic> payload, {
+    required String msgId,
+    String? text,
+  }) async {
     final c = StoredChat(
       msgId: msgId,
       peerId: peerId,
@@ -192,10 +196,10 @@ class MessageStore {
   /// Remove messages older than [maxAge] (housekeeping; not part of the
   /// protocol). Returns how many entries were dropped.
   Future<int> prune({Duration maxAge = const Duration(days: 90)}) async {
-    final cutoff =
-        DateTime.now().subtract(maxAge).millisecondsSinceEpoch;
-    final stale =
-        _cache.values.where((m) => m.ts != 0 && m.ts < cutoff).toList();
+    final cutoff = DateTime.now().subtract(maxAge).millisecondsSinceEpoch;
+    final stale = _cache.values
+        .where((m) => m.ts != 0 && m.ts < cutoff)
+        .toList();
     for (final m in stale) {
       _cache.remove(m.msgId);
       await _prefs.remove('$_blobPrefix${m.msgId}');
@@ -213,8 +217,7 @@ class MessageStore {
   void _emit() {
     final c = _changes;
     if (c != null && !c.isClosed) {
-      final all = _cache.values.toList()
-        ..sort((a, b) => a.ts.compareTo(b.ts));
+      final all = _cache.values.toList()..sort((a, b) => a.ts.compareTo(b.ts));
       c.add(all);
     }
   }
