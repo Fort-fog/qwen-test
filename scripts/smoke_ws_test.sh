@@ -28,26 +28,33 @@ def pkt(t, **kw):
     p.update(kw)
     return json.dumps(p)
 
+def payload_of(m):
+    # The server relays payloads as raw JSON objects; tolerate both dict and str.
+    p = m.get("payload")
+    if isinstance(p, str):
+        return json.loads(p)
+    return p or {}
+
 async def hello(ws, dev):
     await ws.send(pkt("HELLO", payload={"device_id": dev, "client_nonce": uuid.uuid4().hex}))
     while True:
         m = json.loads(await asyncio.wait_for(ws.recv(), 5))
         if m["type"] == "WELCOME":
-            warn = json.loads(m["payload"]).get("e2ee_warning", "")
+            warn = payload_of(m).get("e2ee_warning", "")
             print(f"[{dev}] WELCOME ok; e2e warning present: {bool(warn)}")
             return m
         if m["type"] == "ERROR":
             print(f"[{dev}] HELLO rejected: {m}")
             sys.exit(1)
 
-async def recv_type(ws, dev, want, timeout=5):
+async def recv_type(ws, dev, *want, timeout=5):
     while True:
         m = json.loads(await asyncio.wait_for(ws.recv(), timeout))
         if m["type"] == "PING":
             continue
-        if m["type"] == want:
+        if m["type"] in want:
             return m
-        if m["type"] == "ERROR":
+        if m["type"] == "ERROR" and "ERROR" not in want:
             print(f"[{dev}] ERROR: {m}")
             sys.exit(1)
         # tolerate other types by looping
@@ -64,7 +71,7 @@ async def main():
         got = await recv_type(b, DEV_B, "MESSAGE")
         assert got["msg_id"] == msg_id, got
         assert got["from"] == DEV_A, got
-        body = json.loads(got["payload"]) if isinstance(got.get("payload"), str) else got.get("payload", {})
+        body = payload_of(got)
         print(f"[{DEV_B}] received MESSAGE msg_id={got['msg_id']} from={got['from']} text={body.get('text')!r}")
 
         ack = await recv_type(a, DEV_A, "MESSAGE_ACK")
@@ -78,14 +85,21 @@ async def main():
         assert rep["msg_id"] == rid and rep["from"] == DEV_B, rep
         print(f"[{DEV_A}] received reply msg_id={rep['msg_id']} from={rep['from']}")
 
-        # offline status check
+        # Offline recipient is now persisted server-side: sender gets a
+        # STORED ack instead of PEER_OFFLINE (offline storage enabled).
+        ghost_id = "ghost-" + uuid.uuid4().hex[:8]
         await a.send(json.dumps({"version": V, "type": "MESSAGE",
-                                 "msg_id": "ghost-1", "from": DEV_A,
+                                 "msg_id": ghost_id, "from": DEV_A,
                                  "to": "nobody-online-here", "payload": {}}))
-        err = await recv_type(a, DEV_A, "ERROR")
-        code = err["payload"]["code"] if isinstance(err.get("payload"), dict) else json.loads(err["payload"])["code"]
-        assert code == "PEER_OFFLINE", err
-        print(f"[{DEV_A}] offline status verified: {code}")
+        stored = await recv_type(a, DEV_A, "MESSAGE_ACK", "ERROR")
+        if stored["type"] == "ERROR":
+            code = payload_of(stored).get("code")
+            assert code == "PEER_OFFLINE", stored
+            print(f"[{DEV_A}] offline status verified: {code} (store disabled?)")
+        else:
+            stage = payload_of(stored).get("stage")
+            assert stage == "STORED_FOR_LATER_DELIVERY", stored
+            print(f"[{DEV_A}] offline message persisted: {stage}")
 
     print("SMOKE TEST PASSED: real bidirectional exchange through the server.")
 

@@ -80,13 +80,13 @@ func Load() (*Config, error) {
 	devMode := devRaw == "true" || devRaw == "1"
 
 	c := &Config{
-		DevMode:       devMode,
-		ListenAddr:    envStr("BOLTUN_LISTEN_ADDR", ":8443"),
-		TLSCertFile:   envStr("BOLTUN_TLS_CERT_FILE", ""),
-		TLSKeyFile:    envStr("BOLTUN_TLS_KEY_FILE", ""),
-		StoreFile:     envStr("BOLTUN_STORE_FILE", "./data/boltun-store.json"),
-		PingInterval:  25 * time.Second,
-		ReadTimeout:   70 * time.Second,
+		DevMode:      devMode,
+		ListenAddr:   envStr("BOLTUN_LISTEN_ADDR", ":8443"),
+		TLSCertFile:  envStr("BOLTUN_TLS_CERT_FILE", ""),
+		TLSKeyFile:   envStr("BOLTUN_TLS_KEY_FILE", ""),
+		StoreFile:    envStr("BOLTUN_STORE_FILE", "./data/boltun-store.json"),
+		PingInterval: 25 * time.Second,
+		ReadTimeout:  70 * time.Second,
 	}
 
 	var err error

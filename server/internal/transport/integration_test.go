@@ -4,6 +4,7 @@ package transport_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -271,7 +272,8 @@ func TestIntegrationDisconnectRemovesSession(t *testing.T) {
 	a := dial(t, ts, "device-alpha")
 	b := dial(t, ts, "device-bravo")
 
-	// Disconnect B; then A->B must yield PEER_OFFLINE eventually.
+	// Disconnect B; then A->B must be persisted offline (STORED ack) or,
+	// if offline storage is disabled, yield PEER_OFFLINE.
 	if err := b.conn.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(time.Second)); err != nil {
@@ -280,16 +282,25 @@ func TestIntegrationDisconnectRemovesSession(t *testing.T) {
 	_ = b.conn.Close()
 
 	deadline := time.Now().Add(3 * time.Second)
-	for {
+	for i := 0; ; i++ {
 		a.send(&protocol.Packet{
 			Version: protocol.ProtocolVersion,
 			Type:    protocol.PacketMessage,
-			MsgID:   "disc-1",
+			MsgID:   fmt.Sprintf("disc-%d", i),
 			To:      "device-bravo",
 			Payload: json.RawMessage(`{}`),
 		})
 		p := a.readUntil(protocol.PacketError, protocol.PacketMessageAck)
-		if p.Type == protocol.PacketError {
+		switch p.Type {
+		case protocol.PacketMessageAck:
+			var ap struct {
+				Stage string `json:"stage"`
+			}
+			_ = json.Unmarshal(p.Payload, &ap)
+			if ap.Stage == "STORED_FOR_LATER_DELIVERY" {
+				return // success: session removed, message queued offline
+			}
+		case protocol.PacketError:
 			var ep protocol.ErrorPayload
 			_ = json.Unmarshal(p.Payload, &ep)
 			if ep.Code == protocol.ErrCodeOffline {

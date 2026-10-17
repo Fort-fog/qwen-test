@@ -1,7 +1,0 @@
-{
-  "name": "android-agent",
-  "description": "An Android-focused agent in the Flutter codebase specializing in Android-specific tasks, including Java, Kotlin, Gradle configurations, and Android SDK interactions.",
-  "configPath": {
-    "relativePathToConfig": "config.yaml"
-  }
-}

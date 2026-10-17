@@ -59,3 +59,20 @@ Thumbs.db
 coverage/
 htmlcov/
 .coverage
+
+# --- Local toolchain SDKs (not part of the project sources) ---
+tools/flutter/
+tools/flutter.broken.*/
+tools/go/
+tools/*.tar.xz
+tools/*.zip
+tools/*_setup*.log
+tools/*_clone.log
+tools/flutter_setup_done
+
+# --- Client build artifacts ---
+client/**/build/
+client/**/.dart_tool/
+client/**/.flutter-plugins*
+client/**/.packages
+data/
