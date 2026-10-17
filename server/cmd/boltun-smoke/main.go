@@ -41,6 +41,9 @@ func (h *handler) OnAck(a client.Ack) {
 func (h *handler) OnError(e client.ServerError) {
 	fmt.Printf("SERVER ERROR: %s (%s)\n", e.Message, e.Code)
 }
+func (h *handler) OnKeyResponse(k client.KeyResponse) {
+	fmt.Printf("KEY_RESPONSE: target=%s found=%v pub=%s\n", k.TargetDeviceID, k.Found, k.IdentityPub)
+}
 func (h *handler) OnClosed(err error) { fmt.Printf("closed: %v\n", err) }
 
 func main() {
