@@ -95,46 +95,55 @@ func (h *E2EHandler) OnError(e ServerError) {
 	h.user.OnError(e)
 }
 
+// maxDeferredPerPeer bounds how many undecryptable envelopes we keep per
+// sender while waiting for its identity key (memory guard).
+const maxDeferredPerPeer = 100
+
 // OnMessage transparently opens "e2ee" envelopes; anything else is passed
 // to OnPlainText untouched.
 func (h *E2EHandler) OnMessage(m Message) {
-	// If we cannot open yet (sender key unresolved), the message must NOT
-	// be consumed by the msg_id dedupe cache: a later retry after the key
-	// arrives has to be able to re-process it. Undo the optimistic
-	// remember() so delivery is retried on next arrival/sync.
-	retryable := h.tryOpen(m)
-	if retryable {
-		h.forget(m.MsgID)
-	}
+	h.tryOpen(m)
 }
 
-func (h *E2EHandler) tryOpen(m Message) (deferForSender string) {
+// tryOpen attempts to open m. Envelopes whose sender key is not yet known
+// are queued in deferred and retried automatically when the KEY_RESPONSE
+// for that sender arrives; they are also released via forget() from the
+// client's msg_id dedupe cache so an external re-delivery can re-process
+// them. All other outcomes (plaintext passthrough, malformed envelope,
+// failed Open, successful decrypt) are terminal — no retry.
+func (h *E2EHandler) tryOpen(m Message) {
 	var env E2EEnvelopePayload
 	if err := json.Unmarshal(m.Payload, &env); err != nil || env.Kind != "e2ee" {
 		h.user.OnPlainText(m)
-		return false
+		return
 	}
 	raw, err := e2e.DecodeEnvelope(env.Env)
 	if err != nil {
 		h.user.OnError(ServerError{Code: "E2E_MALFORMED_ENVELOPE", Message: "cannot base64-decode envelope", RefMsgID: m.MsgID})
-		return false
+		return
 	}
 	senderPub, ok := h.resolvedKey(m.From)
 	if !ok {
-		// We cannot open without the sender's key. Ask for it (best effort)
-		// and report the message as undecryptable-for-now; the envelope is
-		// retryable once KEY_RESPONSE lands.
+		// We cannot open without the sender's key. Queue the envelope for
+		// automatic retry when KEY_RESPONSE lands, ask for the key (best
+		// effort) and report the message as undecryptable-for-now.
+		h.mu.Lock()
+		dq := h.deferred[m.From]
+		if len(dq) < maxDeferredPerPeer {
+			h.deferred[m.From] = append(dq, m)
+		}
+		h.mu.Unlock()
+		h.forget(m.MsgID) // allow re-processing once the key resolves
 		_ = h.RequestPeerKey(m.From)
 		h.user.OnError(ServerError{Code: "E2E_NO_SENDER_KEY", Message: "sender identity key unknown yet", RefMsgID: m.MsgID})
-		return true
+		return
 	}
 	plain, err := e2e.Open(h.keyPair, raw, m.MsgID, senderPub)
 	if err != nil {
 		h.user.OnError(ServerError{Code: "E2E_OPEN_FAILED", Message: err.Error(), RefMsgID: m.MsgID})
-		return false
+		return
 	}
 	h.user.OnDecrypted(m.MsgID, m.From, plain, m.TS)
-	return false
 }
 
 // --- Public E2E API ---

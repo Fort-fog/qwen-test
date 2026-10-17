@@ -9,6 +9,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:meta/meta.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../protocol/packet.dart';
@@ -64,6 +65,15 @@ class MessageStore {
 
   static const _indexKey = 'boltun.store.index'; // msg_id -> json blob key
   static final _blobPrefix = 'boltun.store.msg.';
+
+  /// Test seam: inject a fake SharedPreferences backend (same semantics as
+  /// SharedPreferences.setMockInitialValues in Flutter tests).
+  @visibleForTesting
+  static Future<MessageStore> openWith(SharedPreferences prefs) async {
+    final s = MessageStore._(prefs);
+    s._load();
+    return s;
+  }
 
   final SharedPreferences _prefs;
   final Map<String, StoredChat> _cache = {};
