@@ -18,6 +18,7 @@ import '../net/relay_client.dart';
 import '../protocol/packet.dart';
 import 'identity_store.dart';
 import 'message_store.dart';
+import 'peer_trust.dart';
 
 // `open` is also the name of MessageStore.open's verb; alias the crypto
 // entry point so both read unambiguously.
@@ -75,6 +76,10 @@ class BoltunSession {
   /// E2EHandler deferred queue, bounded per peer).
   final Map<String, List<Packet>> _deferred = {};
   static const int _maxDeferredPerPeer = 100;
+
+  /// TOFU pin registry for peer identity keys (public material only).
+  /// A relay-supplied key is never trusted merely because it parses.
+  final PeerTrustStore trust = PeerTrustStore();
 
   final StreamController<SessionSnapshot> _snap = StreamController.broadcast();
   ConnState _state = ConnState.disconnected;
@@ -233,6 +238,10 @@ class BoltunSession {
   }
 
   void _handleKeyResponse(KeyResponse r) {
+    unawaited(_processKeyResponse(r));
+  }
+
+  Future<void> _processKeyResponse(KeyResponse r) async {
     if (!r.found || r.identityPub.isEmpty) return;
     final client = _client;
     if (client == null) return;
@@ -243,6 +252,18 @@ class BoltunSession {
       return;
     }
     if (key.length != 32) return;
+    // TOFU pinning: a relay-supplied key is NEVER trusted just because it
+    // is well-formed. It is pinned as unverified; a later change of the
+    // same DeviceID surfaces as KeyChangeConflict (kept old pin wins).
+    final outcome = await trust.register(r.targetDeviceId, key);
+    if (outcome is KeyChangeConflict) {
+      _lastError =
+          'E2E_KEY_CHANGE:${r.targetDeviceId}:'
+          '${outcome.oldFingerprint}->${outcome.newFingerprint}';
+      // Do NOT overwrite the cached/pinned key — keep talking to the old
+      // identity until the user re-verifies out of band.
+      return;
+    }
     client.peerKeys[r.targetDeviceId] = key;
     // Retry envelopes that arrived before this sender's key was known.
     final retry = _deferred.remove(r.targetDeviceId);
