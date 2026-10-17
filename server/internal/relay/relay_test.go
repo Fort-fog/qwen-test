@@ -9,11 +9,13 @@ import (
 
 	"github.com/boltun/server/internal/devices"
 	"github.com/boltun/server/internal/protocol"
+	"github.com/boltun/server/internal/store"
 )
 
 func newTestRelay() (*Relay, *devices.Registry) {
 	reg := devices.NewRegistry()
-	r := New(reg, log.New(io.Discard, "", 0), protocol.MaxPacketSize)
+	st, _ := store.Open("") // in-memory store for tests
+	r := New(reg, st, log.New(io.Discard, "", 0), protocol.MaxPacketSize)
 	return r, reg
 }
 
@@ -141,8 +143,12 @@ func TestRouteBetweenTwoClients(t *testing.T) {
 	}
 }
 
+// TestRecipientOffline verifies the no-store behaviour: when offline storage
+// is disabled (store == nil), messages to unknown/offline peers must produce
+// a PEER_OFFLINE error referencing the original msg_id.
 func TestRecipientOffline(t *testing.T) {
 	r, _ := newTestRelay()
+	r.store = nil // simulate server started with persistence disabled
 	sa, ca := mkSession("device-alpha")
 	if err := r.Registry().Register(sa); err != nil {
 		t.Fatal(err)
