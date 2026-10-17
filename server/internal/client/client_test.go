@@ -81,6 +81,8 @@ func (c *collector) OnAck(a client.Ack) {
 	c.acks = append(c.acks, a)
 }
 
+func (c *collector) OnKeyResponse(k client.KeyResponse) {}
+
 func (c *collector) OnError(e client.ServerError) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -75,7 +75,7 @@ var ClientToServerTypes = map[PacketType]bool{
 	PacketMessage: true, PacketMessageAck: true, PacketDeliveryStat: true,
 	PacketSyncRequest: true, PacketStoreAck: true,
 	PacketKeyRequest: true,
-	FileOffer: true, FileChunk: true, FileComplete: true,
+	FileOffer:        true, FileChunk: true, FileComplete: true,
 	CallOffer: true, CallAnswer: true, CallICE: true,
 	CallReject: true, CallEnd: true,
 }

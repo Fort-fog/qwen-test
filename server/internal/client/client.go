@@ -435,6 +435,18 @@ func (c *Client) remember(msgID string) bool {
 	return true
 }
 
+// forget removes a msg_id from the dedupe cache so an undelivered message
+// (e.g. E2E envelope awaiting the sender key) can be reprocessed on its
+// next arrival. Used by E2EHandler only.
+func (c *Client) forget(msgID string) {
+	if msgID == "" {
+		return
+	}
+	c.seenMu.Lock()
+	defer c.seenMu.Unlock()
+	delete(c.seen, msgID)
+}
+
 func (c *Client) shutdown(reason error) {
 	c.closedOnce.Do(func() {
 		c.connMu.Lock()
