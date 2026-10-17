@@ -12,11 +12,14 @@ String pubHex(IdentityKeyPair kp) =>
     kp.publicBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 class FakeBackend implements SecureBackend {
+  /// [sharedData] lets several backend instances observe the same map,
+  /// simulating a process restart over one persistent keystore.
   FakeBackend({
     required this.isProtected,
     this.unavailableReason,
     Map<String, String>? seed,
-  }) : data = {...?seed};
+    Map<String, String>? sharedData,
+  }) : data = sharedData ?? {...?seed};
   final Map<String, String> data;
   @override
   final bool isProtected;
@@ -66,18 +69,28 @@ void main() {
     );
 
     test(
-      'corrupt stored entry -> regenerated, not crashed; no leak in logs',
+      'corrupt stored entry -> explicit error, NOT silently regenerated',
       () async {
+        // Superseded by the fail-loud lifecycle policy (integration stage):
+        // a corrupt entry must raise IdentityLoadException and stay in place;
+        // only an explicit clear() may reset the identity. This replaces the
+        // old expectation that corruption was auto-repaired with a fresh key.
         final be = FakeBackend(isProtected: true);
         be.data['boltun.identity.seed.b64'] = 'not-valid-base64!!!';
         final s = SecureStorageIdentityStore(be);
+        await expectLater(
+          s.loadOrCreate(),
+          throwsA(isA<IdentityLoadException>()),
+        );
+        expect(be.data['boltun.identity.seed.b64'], 'not-valid-base64!!!');
+        // After an explicit reset a valid fresh seed is persisted.
+        await s.clear();
         final kp = await s.loadOrCreate();
-        expect(kp.privateBytes.length, 32);
-        // Corrupt value replaced with a valid fresh seed.
         expect(
           Uint8List.fromList(base64.decode(be.data[s.keyName]!)).length,
           32,
         );
+        expect(kp.privateBytes.length, 32);
       },
     );
 
