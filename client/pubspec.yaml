@@ -13,6 +13,11 @@ dependencies:
   shared_preferences: ^2.3.0
   crypto: ^3.0.0
   cryptography: ^2.7.0
+  # Production secret storage (Android Keystore / iOS Keychain / Linux
+  # Secret Service / Windows Credential Manager). 9.x line: compatible with
+  # our SDK constraint and ships platform_interface ^1.1 whose MethodChannel
+  # protocol this adapter pins.
+  flutter_secure_storage: ^9.2.4
 
 dev_dependencies:
   flutter_test:

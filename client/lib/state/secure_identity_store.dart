@@ -135,6 +135,11 @@ class SecureStorageIdentityStore implements IdentityStore {
     _cached = null;
   }
 
+  @override
+  String toString() =>
+      'SecureStorageIdentityStore(persisted: '
+      '${backend.isProtected})'; // never expose key material
+
   /// Whether the identity will survive an app restart. UI uses this to show
   /// the "no secure storage available" warning instead of pretending safety.
   bool get persistsAcrossRestart => backend.isProtected;
