@@ -326,7 +326,7 @@ func TestE2EWrongRecipientNoDecrypt(t *testing.T) {
 
 	// Alice seals for EVE's key but sends the envelope to BOB (mis-route).
 	ch, _ := alice.FetchPeerKey("nobody-eve") // will fail: eve offline
-	<-ch                                     // drain closed channel
+	<-ch                                      // drain closed channel
 	env, err := e2e.Seal(aliceKP, &eveKP.Public, "wrong-recip-1", []byte("not for bob"))
 	if err != nil {
 		t.Fatal(err)
