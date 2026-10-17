@@ -106,13 +106,13 @@ type Packet struct {
 
 // Validation errors.
 var (
-	ErrMissingType    = fmt.Errorf("protocol: missing packet type")
-	ErrUnknownType    = fmt.Errorf("protocol: unknown packet type")
-	ErrBadVersion     = fmt.Errorf("protocol: unsupported protocol version")
-	ErrMissingMsgID   = fmt.Errorf("protocol: missing msg_id")
-	ErrMissingTo      = fmt.Errorf("protocol: missing recipient (to)")
-	ErrPayloadTooBig  = fmt.Errorf("protocol: payload exceeds limit")
-	ErrInvalidJSON    = fmt.Errorf("protocol: invalid JSON packet")
+	ErrMissingType   = fmt.Errorf("protocol: missing packet type")
+	ErrUnknownType   = fmt.Errorf("protocol: unknown packet type")
+	ErrBadVersion    = fmt.Errorf("protocol: unsupported protocol version")
+	ErrMissingMsgID  = fmt.Errorf("protocol: missing msg_id")
+	ErrMissingTo     = fmt.Errorf("protocol: missing recipient (to)")
+	ErrPayloadTooBig = fmt.Errorf("protocol: payload exceeds limit")
+	ErrInvalidJSON   = fmt.Errorf("protocol: invalid JSON packet")
 )
 
 // Validate performs structural checks that do not depend on session state.
@@ -199,27 +199,27 @@ const (
 
 // ErrorPayload is the payload structure of an ERROR packet.
 type ErrorPayload struct {
-	Code    ErrorCode `json:"code"`
-	Message string    `json:"message"`
-	RefMsgID string   `json:"ref_msg_id,omitempty"`
+	Code     ErrorCode `json:"code"`
+	Message  string    `json:"message"`
+	RefMsgID string    `json:"ref_msg_id,omitempty"`
 }
 
 // WelcomePayload is the payload structure of a WELCOME packet.
 type WelcomePayload struct {
-	ServerTime       int64  `json:"server_time"`
-	SessionID        string `json:"session_id"`
-	E2EEActive       bool   `json:"e2ee_active"`
-	E2EEWarning      string `json:"e2ee_warning"`
-	MaxPacketBytes   int    `json:"max_packet_bytes"`
-	PingIntervalSec  int    `json:"ping_interval_sec"`
-	PendingMessages  int    `json:"pending_messages"`
+	ServerTime      int64  `json:"server_time"`
+	SessionID       string `json:"session_id"`
+	E2EEActive      bool   `json:"e2ee_active"`
+	E2EEWarning     string `json:"e2ee_warning"`
+	MaxPacketBytes  int    `json:"max_packet_bytes"`
+	PingIntervalSec int    `json:"ping_interval_sec"`
+	PendingMessages int    `json:"pending_messages"`
 }
 
 // SyncResponsePayload is the payload structure of a server-originated
 // SYNC_RESPONSE packet (offline queue delivered on request).
 type SyncResponsePayload struct {
-	Messages []SyncedMessage `json:"messages"`
-	Truncated bool           `json:"truncated,omitempty"`
+	Messages  []SyncedMessage `json:"messages"`
+	Truncated bool            `json:"truncated,omitempty"`
 }
 
 // SyncedMessage mirrors one stored message back to its recipient.

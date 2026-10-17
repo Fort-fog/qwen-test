@@ -33,12 +33,12 @@ const (
 // of it inside an authenticated channel (zero-knowledge proof or signed
 // confirmation — final choice pending crypto-library decision).
 type Challenge struct {
-	Version        int       `json:"version"`         // pairing format version
-	SessionID      string    `json:"session_id"`      // random one-time id
-	OldDeviceID    string    `json:"old_device_id"`   // claiming identity (not proof!)
-	OldDevicePub   string    `json:"old_device_pub"`  // public key, base64 (placeholder field)
-	SharedSecretHash string  `json:"secret_commit"`   // commitment hash of one-time secret
-	ExpiresAt      time.Time `json:"expires_at"`
+	Version          int       `json:"version"`        // pairing format version
+	SessionID        string    `json:"session_id"`     // random one-time id
+	OldDeviceID      string    `json:"old_device_id"`  // claiming identity (not proof!)
+	OldDevicePub     string    `json:"old_device_pub"` // public key, base64 (placeholder field)
+	SharedSecretHash string    `json:"secret_commit"`  // commitment hash of one-time secret
+	ExpiresAt        time.Time `json:"expires_at"`
 	// Display info shown to the scanning user (device name/model hint).
 	DeviceLabel string `json:"device_label,omitempty"`
 }
@@ -59,10 +59,10 @@ type entry struct {
 }
 
 var (
-	ErrNotFound  = errors.New("pairing: unknown session")
-	ErrReused    = errors.New("pairing: session already used or not pending")
-	ErrExpired   = errors.New("pairing: session expired")
-	ErrNotImpl   = errors.New("pairing: secure pairing NOT IMPLEMENTED - stub only")
+	ErrNotFound = errors.New("pairing: unknown session")
+	ErrReused   = errors.New("pairing: session already used or not pending")
+	ErrExpired  = errors.New("pairing: session expired")
+	ErrNotImpl  = errors.New("pairing: secure pairing NOT IMPLEMENTED - stub only")
 )
 
 func NewManager(ttl time.Duration) *Manager {

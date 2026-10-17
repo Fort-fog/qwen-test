@@ -19,12 +19,12 @@ import (
 )
 
 type Server struct {
-	cfg     *config.Config
-	relay   *relay.Relay
-	logger  *log.Logger
+	cfg      *config.Config
+	relay    *relay.Relay
+	logger   *log.Logger
 	upgrader websocket.Upgrader
-	sem     chan struct{} // connection limiter
-	httpSrv *http.Server
+	sem      chan struct{} // connection limiter
+	httpSrv  *http.Server
 }
 
 func New(cfg *config.Config, r *relay.Relay, logger *log.Logger) *Server {
@@ -53,11 +53,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"status":       "ok",
-			"online":       s.relay.Registry().Count(),
-			"protocol":     protocol.ProtocolVersion,
-			"e2ee_active":  false,
-			"dev_mode":     s.cfg.DevMode,
+			"status":      "ok",
+			"online":      s.relay.Registry().Count(),
+			"protocol":    protocol.ProtocolVersion,
+			"e2ee_active": false,
+			"dev_mode":    s.cfg.DevMode,
 		})
 	})
 	return mux
@@ -167,6 +167,12 @@ func (s *Server) serveConn(conn *websocket.Conn) {
 		closeConn()
 		return nil
 	})
+	// gorilla invokes the close handler only when a Close frame is *received*.
+	// If the client simply drops the TCP connection (conn.Close() on its side),
+	// ReadMessage fails without ever calling the handler, which would leave the
+	// writer goroutine blocked forever and delay session cleanup. Treating any
+	// read-loop exit as a connection close fixes both problems.
+	defer closeConn()
 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(s.cfg.ReadTimeout))

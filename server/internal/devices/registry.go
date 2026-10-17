@@ -32,8 +32,8 @@ type Session struct {
 // Registry is a concurrency-safe map of online device sessions.
 type Registry struct {
 	mu       sync.RWMutex
-	sessions map[string]*Session      // deviceID -> session
-	tokens   map[string]string        // sessionID -> deviceID
+	sessions map[string]*Session // deviceID -> session
+	tokens   map[string]string   // sessionID -> deviceID
 }
 
 func NewRegistry() *Registry {
