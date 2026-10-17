@@ -7,26 +7,32 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"time"
 
 	"github.com/boltun/server/internal/devices"
 	"github.com/boltun/server/internal/protocol"
+	"github.com/boltun/server/internal/store"
 )
 
 // Relay routes packets between connected sessions.
 type Relay struct {
 	reg      *devices.Registry
+	store    *store.Store
 	logger   *log.Logger
 	maxBytes int
 }
 
-func New(reg *devices.Registry, logger *log.Logger, maxBytes int) *Relay {
-	return &Relay{reg: reg, logger: logger, maxBytes: maxBytes}
+func New(reg *devices.Registry, st *store.Store, logger *log.Logger, maxBytes int) *Relay {
+	return &Relay{reg: reg, store: st, logger: logger, maxBytes: maxBytes}
 }
 
 // Registry exposes the device registry (health endpoint, tests).
 func (r *Relay) Registry() *devices.Registry { return r.reg }
+
+// Store exposes the message store (health endpoint, tests).
+func (r *Relay) Store() *store.Store { return r.store }
 
 func newSessionID() string {
 	b := make([]byte, 16)
@@ -68,6 +74,11 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 	}
 	r.logger.Printf("session opened device=%s session=%s", sess.DeviceID, short(sess.SessionID))
 
+	pending := 0
+	if r.store != nil {
+		pending = r.store.Count(sess.DeviceID)
+	}
+
 	welcome := &protocol.Packet{
 		Version: protocol.ProtocolVersion,
 		Type:    protocol.PacketWelcome,
@@ -79,6 +90,7 @@ func (r *Relay) HandleHello(send chan []byte, raw json.RawMessage) (*protocol.Pa
 			E2EEWarning:     "END-TO-END ENCRYPTION NOT ACTIVE YET: this build relays plaintext test packets. Do not send real private data.",
 			MaxPacketBytes:  r.maxBytes,
 			PingIntervalSec: 25,
+			PendingMessages: pending,
 		}),
 	}
 	return welcome, sess
@@ -110,6 +122,12 @@ func (r *Relay) Dispatch(sender *devices.Session, p *protocol.Packet, out chan [
 		protocol.CallReject, protocol.CallEnd:
 		r.routeToPeer(sender, p, out)
 
+	case protocol.PacketSyncRequest:
+		r.handleSync(sender, p, out)
+
+	case protocol.PacketStoreAck:
+		r.handleStoreAck(sender, p, out)
+
 	case protocol.PacketDeviceReg:
 		// Reserved for key-based registration handshake (not implemented).
 		send(out, r.errorPacketAt(protocol.ErrCodeNotSupported,
@@ -129,7 +147,33 @@ func (r *Relay) routeToPeer(sender *devices.Session, p *protocol.Packet, out cha
 	peer, ok := r.reg.Get(p.To)
 	if !ok {
 		// Deterministic status: peer has never been seen OR is not online.
-		// Skeleton does not persist device directory, so both map to OFFLINE.
+		// MESSAGE packets to offline peers are persisted in the store and
+		// delivered later via SYNC_REQUEST / STORE_ACK.
+		if p.Type == protocol.PacketMessage && r.store != nil {
+			sm := store.StoredMessage{
+				MsgID:   p.MsgID,
+				From:    sender.DeviceID,
+				TS:      time.Now().UnixMilli(),
+				Type:    string(p.Type),
+				Payload: p.Payload,
+			}
+			if err := r.store.Append(p.To, sm); err != nil {
+				r.logger.Printf("store append failed recipient=%s msg_id=%s: %v", p.To, p.MsgID, err)
+				send(out, r.errorPacketAt(protocol.ErrCodeInternal, "offline storage failed", p.MsgID))
+				return
+			}
+			storedAck := &protocol.Packet{
+				Version: protocol.ProtocolVersion,
+				Type:    protocol.PacketMessageAck,
+				From:    "server",
+				To:      sender.DeviceID,
+				MsgID:   p.MsgID + ".stored",
+				TS:      time.Now().UnixMilli(),
+				Payload: mustJSON(map[string]any{"ref_msg_id": p.MsgID, "stage": "STORED_FOR_LATER_DELIVERY"}),
+			}
+			send(out, storedAck)
+			return
+		}
 		send(out, r.errorPacketAt(protocol.ErrCodeOffline,
 			"recipient is not currently connected", p.MsgID))
 		return
@@ -217,4 +261,76 @@ func short(s string) string {
 		return s[:8]
 	}
 	return s
+}
+
+// handleSync delivers the recipient's stored offline queue. Messages are
+// NOT deleted here — deletion happens only on explicit STORE_ACK, so a
+// client that crashes mid-sync will receive them again next time
+// (at-least-once delivery; clients must deduplicate by msg_id).
+func (r *Relay) handleSync(sender *devices.Session, p *protocol.Packet, out chan []byte) {
+	if r.store == nil {
+		send(out, r.errorPacketAt(protocol.ErrCodeNotSupported,
+			"offline storage disabled on this server", p.MsgID))
+		return
+	}
+	msgs, err := r.store.Pending(sender.DeviceID)
+	if err != nil {
+		send(out, r.errorPacketAt(protocol.ErrCodeInternal, "store read failed", p.MsgID))
+		return
+	}
+	synced := make([]protocol.SyncedMessage, 0, len(msgs))
+	for _, m := range msgs {
+		synced = append(synced, protocol.SyncedMessage{
+			MsgID:   m.MsgID,
+			From:    m.From,
+			Type:    m.Type,
+			TS:      m.TS,
+			Payload: m.Payload,
+		})
+	}
+	resp := &protocol.Packet{
+		Version: protocol.ProtocolVersion,
+		Type:    protocol.PacketSyncResponse,
+		From:    "server",
+		To:      sender.DeviceID,
+		MsgID:   p.MsgID,
+		TS:      time.Now().UnixMilli(),
+		Payload: mustJSON(protocol.SyncResponsePayload{Messages: synced}),
+	}
+	send(out, resp)
+}
+
+// handleStoreAck removes one previously-synced message from the store after
+// the recipient confirms durable receipt. Only the authenticated recipient
+// may ack its own queue entries (sender identity is bound to the session).
+func (r *Relay) handleStoreAck(sender *devices.Session, p *protocol.Packet, out chan []byte) {
+	if r.store == nil {
+		send(out, r.errorPacketAt(protocol.ErrCodeNotSupported,
+			"offline storage disabled on this server", p.MsgID))
+		return
+	}
+	var ack struct {
+		RefMsgID string `json:"ref_msg_id"`
+	}
+	if len(p.Payload) > 0 {
+		if err := json.Unmarshal(p.Payload, &ack); err != nil || ack.RefMsgID == "" {
+			send(out, r.errorPacketAt(protocol.ErrCodeMalformed,
+				"STORE_ACK requires payload {\"ref_msg_id\": ...}", p.MsgID))
+			return
+		}
+	} else {
+		send(out, r.errorPacketAt(protocol.ErrCodeMalformed,
+			"STORE_ACK requires payload {\"ref_msg_id\": ...}", p.MsgID))
+		return
+	}
+	err := r.store.Ack(sender.DeviceID, ack.RefMsgID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Idempotent: already removed (duplicate ack). Not an error.
+		r.logger.Printf("store_ack noop device=%s ref=%s", sender.DeviceID, ack.RefMsgID)
+	case err != nil:
+		send(out, r.errorPacketAt(protocol.ErrCodeInternal, "store ack failed", p.MsgID))
+	default:
+		r.logger.Printf("store_ack device=%s ref=%s", sender.DeviceID, ack.RefMsgID)
+	}
 }

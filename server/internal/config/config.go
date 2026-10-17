@@ -74,6 +74,7 @@ func envDur(key string, def time.Duration) (time.Duration, error) {
 //	BOLTUN_MAX_CONNECTIONS default 1024
 //	BOLTUN_READ_TIMEOUT    default "70s"
 //	BOLTUN_PING_INTERVAL   default "25s"
+//	BOLTUN_STORE_FILE      default "./data/boltun-store.json" ("" = in-memory)
 func Load() (*Config, error) {
 	devRaw := envStr("BOLTUN_DEV_MODE", "")
 	devMode := devRaw == "true" || devRaw == "1"
@@ -83,6 +84,7 @@ func Load() (*Config, error) {
 		ListenAddr:    envStr("BOLTUN_LISTEN_ADDR", ":8443"),
 		TLSCertFile:   envStr("BOLTUN_TLS_CERT_FILE", ""),
 		TLSKeyFile:    envStr("BOLTUN_TLS_KEY_FILE", ""),
+		StoreFile:     envStr("BOLTUN_STORE_FILE", "./data/boltun-store.json"),
 		PingInterval:  25 * time.Second,
 		ReadTimeout:   70 * time.Second,
 	}
