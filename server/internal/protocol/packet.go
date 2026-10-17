@@ -55,6 +55,7 @@ var validTypes = map[PacketType]bool{
 	PacketPing: true, PacketPong: true, PacketDeviceReg: true,
 	PairRequest: true, PairAccept: true, PairReject: true,
 	PacketMessage: true, PacketMessageAck: true, PacketDeliveryStat: true,
+	PacketSyncRequest: true, PacketSyncResponse: true, PacketStoreAck: true,
 	FileOffer: true, FileChunk: true, FileComplete: true,
 	CallOffer: true, CallAnswer: true, CallICE: true,
 	CallReject: true, CallEnd: true,

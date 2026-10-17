@@ -20,6 +20,7 @@ import (
 	"github.com/boltun/server/internal/devices"
 	"github.com/boltun/server/internal/protocol"
 	"github.com/boltun/server/internal/relay"
+	"github.com/boltun/server/internal/store"
 	"github.com/boltun/server/internal/transport"
 )
 
@@ -35,8 +36,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.StoreFile != "" {
+		if err := store.EnsureDir(cfg.StoreFile); err != nil {
+			logger.Printf("FATAL store dir: %v", err)
+			os.Exit(1)
+		}
+	}
+	st, err := store.Open(cfg.StoreFile)
+	if err != nil {
+		logger.Printf("FATAL store open: %v", err)
+		os.Exit(1)
+	}
+
 	reg := devices.NewRegistry()
-	rly := relay.New(reg, logger, cfg.MaxPacketBytes)
+	rly := relay.New(reg, st, logger, cfg.MaxPacketBytes)
 	srv := transport.New(cfg, rly, logger)
 
 	errCh := make(chan error, 1)

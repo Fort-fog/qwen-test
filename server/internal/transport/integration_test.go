@@ -18,6 +18,7 @@ import (
 	"github.com/boltun/server/internal/devices"
 	"github.com/boltun/server/internal/protocol"
 	"github.com/boltun/server/internal/relay"
+	"github.com/boltun/server/internal/store"
 	"github.com/boltun/server/internal/transport"
 )
 
@@ -38,7 +39,8 @@ func newServer(t *testing.T) *httptest.Server {
 		PingInterval:   2 * time.Second,
 	}
 	reg := devices.NewRegistry()
-	rly := relay.New(reg, log.New(io.Discard, "", 0), cfg.MaxPacketBytes)
+	st, _ := store.Open("") // in-memory store for tests
+	rly := relay.New(reg, st, log.New(io.Discard, "", 0), cfg.MaxPacketBytes)
 	srv := transport.New(cfg, rly, log.New(io.Discard, "", 0))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -179,6 +181,9 @@ func TestIntegrationSpoofedFromIsBound(t *testing.T) {
 	}
 }
 
+// TestIntegrationOfflineStatus: with offline storage enabled, a MESSAGE to an
+// unknown recipient is persisted and the sender gets a STORED ack; non-message
+// packets to offline peers still yield PEER_OFFLINE errors.
 func TestIntegrationOfflineStatus(t *testing.T) {
 	ts := newServer(t)
 	a := dial(t, ts, "device-alpha")
@@ -190,11 +195,26 @@ func TestIntegrationOfflineStatus(t *testing.T) {
 		To:      "device-nowhere",
 		Payload: json.RawMessage(`{}`),
 	})
+	ack := a.readUntil(protocol.PacketMessageAck)
+	var ap map[string]any
+	_ = json.Unmarshal(ack.Payload, &ap)
+	if ap["ref_msg_id"] != "off-1" || ap["stage"] != "STORED_FOR_LATER_DELIVERY" {
+		t.Fatalf("want STORED ack for off-1, got %+v", ap)
+	}
+
+	// Non-message packet to an offline peer must still produce PEER_OFFLINE.
+	a.send(&protocol.Packet{
+		Version: protocol.ProtocolVersion,
+		Type:    protocol.FileOffer,
+		MsgID:   "off-2",
+		To:      "device-nowhere",
+		Payload: json.RawMessage(`{}`),
+	})
 	e := a.readUntil(protocol.PacketError)
 	var ep protocol.ErrorPayload
 	_ = json.Unmarshal(e.Payload, &ep)
-	if ep.Code != protocol.ErrCodeOffline || ep.RefMsgID != "off-1" {
-		t.Fatalf("want PEER_OFFLINE for off-1, got %+v", ep)
+	if ep.Code != protocol.ErrCodeOffline || ep.RefMsgID != "off-2" {
+		t.Fatalf("want PEER_OFFLINE for off-2, got %+v", ep)
 	}
 }
 
