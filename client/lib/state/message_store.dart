@@ -24,6 +24,7 @@ class StoredChat {
     this.text,
     this.rawPayload,
     this.ackedServer = false,
+    this.senderVerified = true,
   });
 
   final String msgId;
@@ -34,27 +35,36 @@ class StoredChat {
   final Map<String, dynamic>? rawPayload;
   bool ackedServer; // STORE_ACK sent (inbound) / MESSAGE_ACK received (out)
 
+  /// Trust state of the sender's pinned identity key at the moment this
+  /// E2E message was opened. Defaults to true for plaintext/legacy and
+  /// outgoing messages (no E2E trust decision involved). UI MUST NOT
+  /// render an inbound message with [senderVerified] == false as a
+  /// trusted chat bubble — see P0.2 in docs/SECURITY.md.
+  final bool senderVerified;
+
   Map<String, dynamic> toJson() => {
-    'msg_id': msgId,
-    'peer': peerId,
-    'out': outgoing,
-    'ts': ts,
-    if (text != null) 'text': text,
-    if (rawPayload != null) 'payload': rawPayload,
-    'acked': ackedServer,
-  };
+        'msg_id': msgId,
+        'peer': peerId,
+        'out': outgoing,
+        'ts': ts,
+        if (text != null) 'text': text,
+        if (rawPayload != null) 'payload': rawPayload,
+        'acked': ackedServer,
+        if (!senderVerified) 'sender_verified': false,
+      };
 
   static StoredChat fromJson(Map<String, dynamic> j) => StoredChat(
-    msgId: j['msg_id'] as String? ?? '',
-    peerId: j['peer'] as String? ?? '',
-    outgoing: j['out'] as bool? ?? false,
-    ts: (j['ts'] as num?)?.toInt() ?? 0,
-    text: j['text'] as String?,
-    rawPayload: j['payload'] is Map<String, dynamic>
-        ? j['payload'] as Map<String, dynamic>
-        : null,
-    ackedServer: j['acked'] as bool? ?? false,
-  );
+        msgId: j['msg_id'] as String? ?? '',
+        peerId: j['peer'] as String? ?? '',
+        outgoing: j['out'] as bool? ?? false,
+        ts: (j['ts'] as num?)?.toInt() ?? 0,
+        text: j['text'] as String?,
+        rawPayload: j['payload'] is Map<String, dynamic>
+            ? j['payload'] as Map<String, dynamic>
+            : null,
+        ackedServer: j['acked'] as bool? ?? false,
+        senderVerified: j['sender_verified'] as bool? ?? true,
+      );
 }
 
 /// SharedPreferences-backed message store with an in-memory mirror for
@@ -75,7 +85,22 @@ class MessageStore {
     return s;
   }
 
-  final SharedPreferences _prefs;
+  /// Test seam for pure-Dart harnesses without the shared_preferences
+  /// plugin: back the store with a plain in-memory map. Production code
+  /// must keep using [open]/[openWith].
+  @visibleForTesting
+  static Future<MessageStore> openInMemory() async {
+    final s = MessageStore._nullPrefs();
+    s._load();
+    return s;
+  }
+
+  /// Builds a store whose [_prefs] field is null; only safe because every
+  /// persistence call routes through the [_prefsOrNull] helpers below, and
+  /// the in-memory mirror (_cache) remains authoritative for reads.
+  static MessageStore _nullPrefs() => MessageStore._(null);
+
+  final SharedPreferences? _prefs;
   final Map<String, StoredChat> _cache = {};
   final List<void Function(StoredChat)> _listeners = [];
 
@@ -87,18 +112,25 @@ class MessageStore {
     return s;
   }
 
+  List<String>? _getStringList(String k) => _prefs?.getStringList(k);
+  String? _getString(String k) => _prefs?.getString(k);
+  Future<void> _setString(String k, String v) async => _prefs?.setString(k, v);
+  Future<void> _setStringList(String k, List<String> v) async =>
+      _prefs?.setStringList(k, v);
+  Future<void> _remove(String k) async => _prefs?.remove(k);
+
   void _load() {
     _cache.clear();
-    final index = _prefs.getStringList(_indexKey) ?? const [];
+    final index = _getStringList(_indexKey) ?? const [];
     for (final id in index) {
-      final raw = _prefs.getString('$_blobPrefix$id');
+      final raw = _getString('$_blobPrefix$id');
       if (raw == null) continue;
       try {
         final c = StoredChat.fromJson(jsonDecode(raw) as Map<String, dynamic>);
         _cache[c.msgId] = c;
       } catch (_) {
         // Corrupt entry: drop it rather than crash the whole store.
-        _prefs.remove('$_blobPrefix$id');
+        _remove('$_blobPrefix$id');
       }
     }
   }
@@ -134,7 +166,10 @@ class MessageStore {
 
   /// Durably insert an inbound packet (from the relay or a SYNC_RESPONSE).
   /// Returns false if the msg_id was already present (duplicate delivery).
-  Future<bool> putInbound(Packet p) async {
+  /// [senderVerified] tags E2E-opened messages whose sender key is pinned
+  /// but not yet confirmed out-of-band (P0.2); defaults to true for the
+  /// plaintext/legacy path, which has no E2E trust decision at all.
+  Future<bool> putInbound(Packet p, {bool senderVerified = true}) async {
     if (p.msgId.isEmpty || knows(p.msgId)) return false;
     final c = StoredChat(
       msgId: p.msgId,
@@ -145,6 +180,7 @@ class MessageStore {
       rawPayload: p.payload is Map<String, dynamic>
           ? Map<String, dynamic>.from(p.payload as Map)
           : null,
+      senderVerified: senderVerified,
     );
     await _put(c);
     return true;
@@ -171,11 +207,11 @@ class MessageStore {
 
   Future<void> _put(StoredChat c) async {
     _cache[c.msgId] = c;
-    final index = _prefs.getStringList(_indexKey)?.toList() ?? [];
+    final index = _getStringList(_indexKey)?.toList() ?? [];
     index.add(c.msgId);
     await Future.wait([
-      _prefs.setStringList(_indexKey, index),
-      _prefs.setString('$_blobPrefix${c.msgId}', jsonEncode(c.toJson())),
+      _setStringList(_indexKey, index),
+      _setString('$_blobPrefix${c.msgId}', jsonEncode(c.toJson())),
     ]);
     for (final l in _listeners) {
       l(c);
@@ -189,7 +225,7 @@ class MessageStore {
     final c = _cache[msgId];
     if (c == null || c.ackedServer) return;
     c.ackedServer = true;
-    await _prefs.setString('$_blobPrefix$msgId', jsonEncode(c.toJson()));
+    await _setString('$_blobPrefix$msgId', jsonEncode(c.toJson()));
     _emit();
   }
 
@@ -197,16 +233,15 @@ class MessageStore {
   /// protocol). Returns how many entries were dropped.
   Future<int> prune({Duration maxAge = const Duration(days: 90)}) async {
     final cutoff = DateTime.now().subtract(maxAge).millisecondsSinceEpoch;
-    final stale = _cache.values
-        .where((m) => m.ts != 0 && m.ts < cutoff)
-        .toList();
+    final stale =
+        _cache.values.where((m) => m.ts != 0 && m.ts < cutoff).toList();
     for (final m in stale) {
       _cache.remove(m.msgId);
-      await _prefs.remove('$_blobPrefix${m.msgId}');
+      await _remove('$_blobPrefix${m.msgId}');
     }
     if (stale.isNotEmpty) {
       final index = _cache.keys.toList();
-      await _prefs.setStringList(_indexKey, index);
+      await _setStringList(_indexKey, index);
       _emit();
     }
     return stale.length;
