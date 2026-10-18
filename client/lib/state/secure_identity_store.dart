@@ -61,11 +61,31 @@ class SecureStorageIdentityStore implements IdentityStore {
 
   IdentityKeyPair? _cached;
 
+  /// True once a failure occurred that could have destroyed or orphaned an
+  /// existing trusted identity (unreadable/corrupt entry, failed write).
+  /// UI/session bootstrap must surface this instead of silently continuing:
+  /// regenerating a new identity while an old one was trusted by peers
+  /// breaks TOFU pins and message history.
+  bool get hadRecoveryEvent => _recoveryEvent;
+  bool _recoveryEvent = false;
+
   @override
   Future<IdentityKeyPair> loadOrCreate() async {
     final c = _cached;
     if (c != null) return c;
-    final stored = await backend.read(keyName);
+
+    final String? stored;
+    try {
+      stored = await backend.read(keyName);
+    } catch (e) {
+      // Read error: NEVER delete the stored entry and NEVER silently
+      // generate a replacement identity — the old key may still be there.
+      throw IdentityLoadException(
+        'secure storage read failed (${e.runtimeType}); existing identity was '
+        'left untouched, no new identity generated',
+      );
+    }
+
     if (stored != null && stored.isNotEmpty) {
       try {
         final kp = await IdentityKeyPair.fromPrivate(
@@ -74,18 +94,40 @@ class SecureStorageIdentityStore implements IdentityStore {
         _cached = kp;
         return kp;
       } catch (_) {
-        // Corrupt entry: regenerate below rather than crash. We deliberately
-        // do NOT log the value.
+        // Entry exists but is corrupt/unparseable. We do NOT overwrite it:
+        // generating a fresh identity would silently orphan any peer trust
+        // pinned to the old key. Fail loudly with an explicit error so the
+        // operator can decide (restore backup / explicit reset via clear()).
+        _recoveryEvent = true;
+        throw IdentityLoadException(
+          'stored identity entry is corrupt; refusing to auto-replace it. '
+          'Explicit identity reset requires calling clear().',
+        );
       }
     }
+
+    // No entry at all -> first launch: generate.
     final kp = await IdentityKeyPair.generate(); // CSPRNG inside e2e module
     if (backend.isProtected) {
-      await backend.write(keyName, base64.encode(kp.privateBytes));
+      try {
+        await backend.write(keyName, base64.encode(kp.privateBytes));
+      } catch (e) {
+        // Write failed: keep working in-memory for this session, but flag
+        // persistence as broken so the app warns the user. The key is NOT
+        // duplicated anywhere weaker (no prefs/JSON/logs).
+        _recoveryEvent = true;
+        _writeFailed = true;
+      }
     }
     // else: fail closed — keep it in memory only, fresh key next launch.
     _cached = kp;
     return kp;
   }
+
+  /// True when the last generation could not be persisted even though the
+  /// backend claims protection (transient keystore error).
+  bool get writeFailed => _writeFailed;
+  bool _writeFailed = false;
 
   @override
   Future<void> clear() async {

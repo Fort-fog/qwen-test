@@ -103,7 +103,17 @@ class BoltunSession {
     _store = await MessageStore.open();
     final store = cfg.identityStore;
     if (store != null) {
-      _identity = await store.loadOrCreate();
+      try {
+        _identity = await store.loadOrCreate();
+      } on IdentityLoadException catch (e) {
+        // The device HAS an identity we could not safely load. Do NOT fall
+        // back to legacy plaintext mode and do NOT generate a replacement:
+        // fail the start explicitly so the operator notices before any
+        // message is sent/received with the wrong key.
+        _started = false;
+        _lastError = 'IDENTITY_LOAD_FAILED: ${e.message}';
+        rethrow;
+      }
     }
     final client = BoltunRelayClient(
       url: cfg.url,

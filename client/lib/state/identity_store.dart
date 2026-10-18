@@ -14,10 +14,24 @@ import 'dart:typed_data';
 
 import '../crypto/e2e.dart';
 
+/// Explicit failure to safely load an existing identity. Thrown by secure
+/// stores when the backend errors or the stored entry is corrupt. Callers
+/// MUST surface this to the operator — never auto-generate a replacement
+/// identity after this error, because peers may have pinned the old key.
+class IdentityLoadException implements Exception {
+  IdentityLoadException(this.message);
+  final String message;
+  @override
+  String toString() => 'IdentityLoadException: $message';
+}
+
 /// Pluggable persistence boundary for the long-lived X25519 identity key.
 abstract class IdentityStore {
   /// Returns the device's identity key pair, creating and persisting a new
   /// one when nothing is stored yet.
+  /// Throws [IdentityLoadException] when an existing identity cannot be
+  /// loaded safely (backend error / corrupt entry) — the stored material is
+  /// left untouched in that case.
   Future<IdentityKeyPair> loadOrCreate();
 
   /// Forget the stored key pair (device reset). The relay-side registration
