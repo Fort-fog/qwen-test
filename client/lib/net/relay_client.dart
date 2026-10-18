@@ -17,6 +17,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../crypto/e2e.dart';
 import '../protocol/packet.dart';
+import 'package:meta/meta.dart';
 
 enum ConnState { disconnected, connecting, connected }
 
@@ -101,6 +102,18 @@ class BoltunRelayClient {
     this.maxReconnectDelay = const Duration(seconds: 30),
     this.identity,
   });
+
+  /// Test-only constructor: a client that never opens a socket. Callbacks
+  /// are wired so the session pipeline can route KEY_RESPONSE etc., while
+  /// connect()/resolvePeerKey() are inert (no network in pure-Dart tests).
+  @visibleForTesting
+  BoltunRelayClient.connectedForTest({
+    required this.url,
+    required this.deviceId,
+    RelayEvents events = const RelayEvents(),
+    this.identity,
+  }) : events = events,
+       maxReconnectDelay = const Duration(seconds: 30);
 
   final String url;
   final String deviceId;

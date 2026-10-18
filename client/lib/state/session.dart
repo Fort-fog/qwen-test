@@ -10,6 +10,8 @@
 library;
 
 import 'dart:async';
+
+import 'package:meta/meta.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -27,7 +29,8 @@ Future<Uint8List> e2eOpen(
   Uint8List envelope,
   String msgId,
   Uint8List senderPub,
-) => e2e.open(recipient, envelope, msgId, senderPub);
+) =>
+    e2e.open(recipient, envelope, msgId, senderPub);
 
 class SessionConfig {
   const SessionConfig({
@@ -63,6 +66,13 @@ class SessionSnapshot {
 }
 
 class BoltunSession {
+  BoltunSession({this.storeFactory});
+
+  /// Test seam: lets pure-Dart tests build a session backed by an
+  /// in-memory MessageStore (MessageStore.openInMemory). Production uses
+  /// the default (SharedPreferences-backed open()).
+  final Future<MessageStore> Function()? storeFactory;
+
   BoltunRelayClient? _client;
   MessageStore? _store;
   SessionConfig? _config;
@@ -75,6 +85,11 @@ class BoltunSession {
   /// retried automatically when KEY_RESPONSE arrives (mirrors the Go
   /// E2EHandler deferred queue, bounded per peer).
   final Map<String, List<Packet>> _deferred = {};
+
+  /// Session-level peer identity-key cache (populated by KEY_RESPONSE via
+  /// [_processKeyResponse]). Kept independent of the socket so the E2E
+  /// pipeline (and tests without a live connection) can resolve keys.
+  final Map<String, Uint8List> _peerKeys = {};
   static const int _maxDeferredPerPeer = 100;
 
   /// TOFU pin registry for peer identity keys (public material only).
@@ -100,7 +115,7 @@ class BoltunSession {
     _started = true;
     _config = cfg;
     _identity = null;
-    _store = await MessageStore.open();
+    _store = await (storeFactory ?? MessageStore.open)();
     final store = cfg.identityStore;
     if (store != null) {
       try {
@@ -155,26 +170,99 @@ class BoltunSession {
     _emit();
   }
 
-  void _handleInbound(Packet p) {
-    if (p.type == PacketType.message && _isE2eEnvelope(p.payload)) {
-      _handleE2eInbound(p);
-      return;
-    }
-    final store = _store;
-    if (store == null) return;
-    // Durable first, ack after — never ack a message we haven't persisted.
-    unawaited(
-      store.putInbound(p).then((fresh) {
-        if (fresh) {
-          _client?.ackStored(p.msgId);
-        }
-        _emit();
-      }),
-    );
+  @visibleForTesting
+  void handleInboundForTest(Packet p) => _handleInbound(p);
+
+  /// Test seams (P0.2): inject the identity without a live socket/store,
+  /// inspect the last surfaced error and the working peer-key cache.
+  @visibleForTesting
+  void injectIdentityForTest(e2e.IdentityKeyPair k) => _identity = k;
+
+  /// Test seam: attach an already-constructed relay client (e.g. one with a
+  /// closed socket) so the E2E inbound pipeline can be exercised without a
+  /// live connection. Production code never calls this.
+  @visibleForTesting
+  Future<void> attachClientForTest(BoltunRelayClient c) async {
+    _client = c;
+    _started = true;
+    _store ??= await MessageStore.openInMemory();
   }
 
-  static bool _isE2eEnvelope(Object? payload) =>
-      payload is Map && payload['kind'] == 'e2ee';
+  @visibleForTesting
+  String? get lastErrorForTest => _lastError;
+
+  @visibleForTesting
+  Map<String, Uint8List> get peerKeysForTest => _client?.peerKeys ?? const {};
+
+  /// Test seam: run the exact KEY_RESPONSE pipeline (TOFU register ->
+  /// peer key cache -> deferred retry) without a live socket.
+  @visibleForTesting
+  Future<void> processKeyResponseForTest(KeyResponse r) =>
+      _processKeyResponse(r);
+
+  void _handleInbound(Packet p) {
+    if (p.type != PacketType.message) return;
+    switch (_classifyInbound(p.payload)) {
+      case _InboundKind.e2e:
+        _handleE2eInbound(p);
+        return;
+      case _InboundKind.plainText:
+        final store = _store;
+        if (store == null) return;
+        // Durable first, ack after — never ack a message we haven't
+        // persisted. This is the legacy plaintext path: it only ever runs
+        // for payloads that are NOT E2E-shaped and carry readable text.
+        unawaited(
+          store.putInbound(p).then((fresh) {
+            if (fresh) {
+              _client?.ackStored(p.msgId);
+            }
+            _emit();
+          }),
+        );
+        return;
+      case _InboundKind.suspicious:
+        // P0.3 anti-bypass: an envelope-shaped payload whose `kind` marker
+        // was stripped/tampered must NEVER fall through to the trusted
+        // plaintext path (default senderVerified=true). It is rejected
+        // without persisting anything readable.
+        _lastError = 'E2E_MALFORMED_ENVELOPE (${p.msgId})';
+        _emit();
+    }
+  }
+
+  /// Classification of inbound MESSAGE payloads (P0.3).
+  ///
+  /// Wire format (docs/protocol/e2e-v1.md §6): an E2E JSON wrapper has
+  /// exactly three keys `{kind:'e2ee', v:1, env:<base64>}`; a legacy text
+  /// message is `{kind:'text', text:...}` or `{"text": ...}`. The marker
+  /// alone is NOT authoritative — an attacker (or a buggy relay) could drop
+  /// `kind` to smuggle an envelope into the plaintext branch. So structure
+  /// decides: any map carrying an `env` member is E2E-shaped regardless of
+  /// `kind`; with `kind=='e2ee'` the payload is E2E even without `env`
+  /// (malformed). Only payloads that actually contain readable text take
+  /// the legacy branch; everything else is rejected as suspicious.
+  static _InboundKind _classifyInbound(Object? payload) {
+    if (payload is! Map) return _InboundKind.suspicious;
+    final isEnvB64 = payload['env'] is String;
+    if (payload['kind'] == 'e2ee') return _InboundKind.e2e;
+    if (isEnvB64) {
+      // Envelope-shaped but kind marker missing/tampered: treat strictly as
+      // E2E. If it turns out undecipherable it fails closed inside
+      // _handleE2eInbound (MALFORMED / NO_SENDER_KEY), never as plaintext.
+      final s = payload['env'] as String;
+      try {
+        base64.decode(s);
+      } on FormatException {
+        return _InboundKind.suspicious;
+      }
+      return _InboundKind.e2e;
+    }
+    if (TextPayload.extract(payload) != null) {
+      return _InboundKind.plainText;
+    }
+    return _InboundKind.suspicious;
+  }
 
   /// Opens an incoming "e2ee" envelope before persisting/acking it.
   /// Failure modes are terminal-safe: malformed envelopes and open errors
@@ -202,12 +290,18 @@ class BoltunSession {
       _emit();
       return;
     }
-    final senderPub = client.peerKeys[p.from];
+    final senderPub = _peerKeys[p.from] ?? client.peerKeys[p.from];
     if (senderPub == null) {
       // Queue for retry once the sender's key resolves; ask for it now.
       final dq = _deferred.putIfAbsent(p.from, () => <Packet>[]);
       if (dq.length < _maxDeferredPerPeer) dq.add(p);
-      unawaited(client.resolvePeerKey(p.from));
+      // Best-effort key fetch: when the socket is down (or in tests without
+      // a live connection) the future completes with an error — swallow it
+      // here so it never becomes an unhandled async exception. Retry happens
+      // on reconnect / next KEY_RESPONSE.
+      unawaited(
+        client.resolvePeerKey(p.from).catchError((Object _) => null),
+      );
       _lastError = 'E2E_NO_SENDER_KEY: ${p.from} (${p.msgId})';
       _emit();
       return;
@@ -215,6 +309,7 @@ class BoltunSession {
     _openAndStore(p, raw, senderPub);
   }
 
+  
   Future<void> _openAndStore(
     Packet p,
     Uint8List raw,
@@ -236,7 +331,13 @@ class BoltunSession {
         payload: TextPayload.build(text),
       );
       // Durable first, ack after — same contract as plaintext inbound.
-      final fresh = await store.putInbound(opened);
+      // P0.2: an E2E-opened message from a peer whose pinned key has NOT
+      // been confirmed out-of-band is stored with senderVerified=false so
+      // the app/UI can never render it as a trusted chat bubble. The
+      // envelope is still opened (correctly keyed content must not be
+      // lost) and STORE_ACK still runs — no plaintext fallback anywhere.
+      final verified = trust.isVerified(p.from);
+      final fresh = await store.putInbound(opened, senderVerified: verified);
       if (fresh) _client?.ackStored(p.msgId);
     } on e2e.E2eException catch (e) {
       // Auth failure / tampering: never store, never silently drop.
@@ -267,14 +368,14 @@ class BoltunSession {
     // same DeviceID surfaces as KeyChangeConflict (kept old pin wins).
     final outcome = await trust.register(r.targetDeviceId, key);
     if (outcome is KeyChangeConflict) {
-      _lastError =
-          'E2E_KEY_CHANGE:${r.targetDeviceId}:'
+      _lastError = 'E2E_KEY_CHANGE:${r.targetDeviceId}:'
           '${outcome.oldFingerprint}->${outcome.newFingerprint}';
       // Do NOT overwrite the cached/pinned key — keep talking to the old
       // identity until the user re-verifies out of band.
       return;
     }
-    client.peerKeys[r.targetDeviceId] = key;
+    _peerKeys[r.targetDeviceId] = key;
+    client?.peerKeys[r.targetDeviceId] = key;
     // Retry envelopes that arrived before this sender's key was known.
     final retry = _deferred.remove(r.targetDeviceId);
     if (retry != null) {
@@ -287,7 +388,7 @@ class BoltunSession {
         } catch (_) {
           continue; // malformed while waiting — surface, don't crash the loop
         }
-        unawaited(_openAndStore(p, raw, key));
+        await _openAndStore(p, raw, key);
       }
     }
   }
@@ -366,3 +467,6 @@ class BoltunSession {
     await _snap.close();
   }
 }
+
+/// Internal classification of inbound MESSAGE payloads (P0.3).
+enum _InboundKind { e2e, plainText, suspicious }

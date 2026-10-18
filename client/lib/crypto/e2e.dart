@@ -73,6 +73,12 @@ class IdentityKeyPair {
 
   static Future<IdentityKeyPair> fromPrivateHex(String hex) =>
       fromPrivate(_unhex(hex));
+
+  /// SECURITY: the default Object.toString() would print the field list and
+  /// could leak `privateBytes` into crash logs / debug output. Override it so
+  /// only public material is ever rendered.
+  @override
+  String toString() => 'IdentityKeyPair(publicOnly)';
 }
 
 Future<Uint8List> _ecdh(Uint8List priv, Uint8List pub) async {

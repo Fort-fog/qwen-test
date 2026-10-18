@@ -8,32 +8,10 @@ import 'package:boltun_client/state/identity_store.dart';
 import 'package:boltun_client/state/secure_identity_store.dart';
 import 'package:test/test.dart';
 
+import 'secure_identity_store_test_helpers.dart';
+
 String pubHex(IdentityKeyPair kp) =>
     kp.publicBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-
-class FakeBackend implements SecureBackend {
-  FakeBackend({
-    required this.isProtected,
-    this.unavailableReason,
-    Map<String, String>? seed,
-  }) : data = {...?seed};
-  final Map<String, String> data;
-  @override
-  final bool isProtected;
-  @override
-  final String? unavailableReason;
-  int writes = 0;
-  @override
-  Future<String?> read(String key) async => data[key];
-  @override
-  Future<void> write(String key, String value) async {
-    writes++;
-    data[key] = value;
-  }
-
-  @override
-  Future<void> delete(String key) async => data.remove(key);
-}
 
 void main() {
   group('SecureStorageIdentityStore', () {
@@ -66,18 +44,28 @@ void main() {
     );
 
     test(
-      'corrupt stored entry -> regenerated, not crashed; no leak in logs',
+      'corrupt stored entry -> explicit error, NOT silently regenerated',
       () async {
+        // Superseded by the fail-loud lifecycle policy (integration stage):
+        // a corrupt entry must raise IdentityLoadException and stay in place;
+        // only an explicit clear() may reset the identity. This replaces the
+        // old expectation that corruption was auto-repaired with a fresh key.
         final be = FakeBackend(isProtected: true);
         be.data['boltun.identity.seed.b64'] = 'not-valid-base64!!!';
         final s = SecureStorageIdentityStore(be);
+        await expectLater(
+          s.loadOrCreate(),
+          throwsA(isA<IdentityLoadException>()),
+        );
+        expect(be.data['boltun.identity.seed.b64'], 'not-valid-base64!!!');
+        // After an explicit reset a valid fresh seed is persisted.
+        await s.clear();
         final kp = await s.loadOrCreate();
-        expect(kp.privateBytes.length, 32);
-        // Corrupt value replaced with a valid fresh seed.
         expect(
           Uint8List.fromList(base64.decode(be.data[s.keyName]!)).length,
           32,
         );
+        expect(kp.privateBytes.length, 32);
       },
     );
 
@@ -219,36 +207,3 @@ void main() {
 /// Lifecycle tests added with the identity-integration stage: explicit
 /// errors on read/corrupt failures, no silent replacement identity, no
 /// auto-delete, write-failure surfaced, clear() is the only reset path.
-class ThrowingReadBackend implements SecureBackend {
-  final Map<String, String> data;
-  ThrowingReadBackend(this.data);
-  @override
-  bool get isProtected => true;
-  @override
-  String? get unavailableReason => null;
-  @override
-  Future<String?> read(String key) async => throw StateError('keystore down');
-  @override
-  Future<void> write(String key, String value) async => data[key] = value;
-  @override
-  Future<void> delete(String key) async => data.remove(key);
-}
-
-class ThrowingWriteBackend implements SecureBackend {
-  final Map<String, String> data = {};
-  int deletes = 0;
-  @override
-  bool get isProtected => true;
-  @override
-  String? get unavailableReason => null;
-  @override
-  Future<String?> read(String key) async => data[key];
-  @override
-  Future<void> write(String key, String value) async =>
-      throw StateError('write denied');
-  @override
-  Future<void> delete(String key) async {
-    deletes++;
-    data.remove(key);
-  }
-}
